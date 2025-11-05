@@ -12,13 +12,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 };
 use std::io;
-
-#[derive(Clone)]
-pub struct FailedUploadInfo {
-    pub error: String,
-    pub file_size: u64,
-    pub status_code: Option<u16>,
-}
+use crate::core::types::FailedUploadInfo;
 
 #[derive(Clone)]
 pub enum UploadStatus {

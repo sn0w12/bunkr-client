@@ -10,7 +10,7 @@ use core::uploader::BunkrUploader;
 use crate::ui::ui::{UIState, start_ui};
 use anyhow::Result;
 use keyring::Entry;
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, io::Write, fs::OpenOptions};
 #[cfg(feature = "ui")]
 use crossterm::{cursor, terminal, ExecutableCommand};
 #[cfg(feature = "ui")]
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
             #[cfg(feature = "ui")]
             let (ui_handle, running) = start_ui(ui_state.clone());
 
-            uploader.upload_files(all_files, album_id.as_deref(), batch_size, #[cfg(feature = "ui")] Some(ui_state), &config).await?;
+            let (_urls, failures) = uploader.upload_files(all_files, album_id.as_deref(), batch_size, #[cfg(feature = "ui")] Some(ui_state), &config).await?;
 
             #[cfg(feature = "ui")]
             {
@@ -171,6 +171,17 @@ async fn main() -> Result<()> {
                 let mut stdout = io::stdout();
                 stdout.execute(terminal::Clear(terminal::ClearType::All)).unwrap();
                 stdout.execute(cursor::MoveTo(0, 0)).unwrap();
+            }
+
+            // Write the failed uploads to a file
+            if !failures.is_empty() {
+                let mut failed_file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("failed_uploads.txt")?;
+                for failure in &failures {
+                    writeln!(failed_file, "File: {}, Error: {}, Size: {}, Status: {:?}", failure.path, failure.error, failure.file_size, failure.status_code)?;
+                }
             }
         }
     }

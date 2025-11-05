@@ -42,6 +42,14 @@ pub struct UploadedFile {
     pub url: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct FailedUploadInfo {
+    pub path: String,
+    pub error: String,
+    pub file_size: u64,
+    pub status_code: Option<u16>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Album {
     pub id: i64,

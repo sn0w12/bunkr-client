@@ -1,6 +1,6 @@
 use crate::{config::bunkr_config::BunkrConfig, config::config::Config, preprocess::preprocess::cleanup_preprocess, core::types::*, core::utils::parse_size};
 #[cfg(feature = "ui")]
-use crate::ui::ui::{UIState, FailedUploadInfo};
+use crate::ui::ui::UIState;
 use anyhow::{Result, anyhow};
 use mime_guess::from_path;
 use reqwest::{Client, multipart};
@@ -98,23 +98,30 @@ impl BunkrUploader {
         })
     }
 
-    pub async fn upload_file(&self, path: &str, album_id: Option<&str>, ui_state: Option<Arc<Mutex<UIState>>>, config: &Config) -> Result<Option<String>> {
+    pub async fn upload_file(&self, path: &str, album_id: Option<&str>, ui_state: Option<Arc<Mutex<UIState>>>, config: &Config) -> Result<(Option<String>, Vec<FailedUploadInfo>)> {
         let p = Path::new(path);
         if !p.exists() {
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             #[cfg(feature = "ui")]
             if let Some(ui_state) = &ui_state {
                 ui_state.lock().unwrap().add_failed(path.to_string(), FailedUploadInfo {
+                    path: path.to_string(),
                     error: format!("File not found: {}", path),
                     file_size: size,
                     status_code: None,
                 });
             }
-            return Ok(None);
+            return Ok((None, vec![FailedUploadInfo {
+                path: path.to_string(),
+                error: format!("File not found: {}", path),
+                file_size: size,
+                status_code: None,
+            }]));
         }
 
         let preprocess_result = crate::preprocess::preprocess::preprocess_file(path, self.max_file_size, config)?;
         let mut urls = vec![];
+        let mut file_fails = vec![];
         for file_path in &preprocess_result.files_to_upload {
             let p = Path::new(file_path);
             if !p.exists() {
@@ -123,7 +130,7 @@ impl BunkrUploader {
             let metadata = p.metadata()?;
             let size = metadata.len();
             let mime = from_path(p).first_or_octet_stream();
-            let url = if size <= self.chunk_size {
+            let (url, fails) = if size <= self.chunk_size {
                 self.upload_single_file(p, mime.essence_str(), album_id, ui_state.clone(), size).await?
             } else {
                 self.upload_chunked_file(p, mime.essence_str(), album_id, ui_state.clone(), size).await?
@@ -131,10 +138,11 @@ impl BunkrUploader {
             if let Some(u) = url {
                 urls.push(u);
             }
+            file_fails.extend(fails);
         }
         // Cleanup after upload
         cleanup_preprocess(&preprocess_result.preprocess_id, path, &preprocess_result.files_to_upload);
-        Ok(Some(urls.join(",")))
+        Ok((Some(urls.join(",")), file_fails))
     }
 
     async fn upload_single_file(
@@ -144,7 +152,7 @@ impl BunkrUploader {
         album_id: Option<&str>,
         ui_state: Option<Arc<Mutex<UIState>>>,
         file_size: u64,
-    ) -> Result<Option<String>> {
+    ) -> Result<(Option<String>, Vec<FailedUploadInfo>)> {
         let file_name = path.file_name().unwrap().to_string_lossy().to_string();
         let mut file = File::open(path)?;
         let mut buf = Vec::new();
@@ -178,12 +186,18 @@ impl BunkrUploader {
             #[cfg(feature = "ui")]
             if let Some(ui_state) = &ui_state {
                 ui_state.lock().unwrap().add_failed(path.to_string_lossy().to_string(), FailedUploadInfo {
+                    path: path.to_string_lossy().to_string(),
                     error: format!("Upload request failed with status {}: {}", status, text),
                     file_size,
                     status_code: Some(status.as_u16()),
                 });
             }
-            return Ok(None);
+            return Ok((None, vec![FailedUploadInfo {
+                path: path.to_string_lossy().to_string(),
+                error: format!("Upload request failed with status {}: {}", status, text),
+                file_size,
+                status_code: Some(status.as_u16()),
+            }]));
         }
         let res: UploadResponse = match serde_json::from_str(&text) {
             Ok(r) => r,
@@ -191,12 +205,18 @@ impl BunkrUploader {
                 #[cfg(feature = "ui")]
                 if let Some(ui_state) = &ui_state {
                     ui_state.lock().unwrap().add_failed(path.to_string_lossy().to_string(), FailedUploadInfo {
+                        path: path.to_string_lossy().to_string(),
                         error: format!("Failed to parse upload response: {}", e),
                         file_size,
                         status_code: None,
                     });
                 }
-                return Ok(None);
+                return Ok((None, vec![FailedUploadInfo {
+                    path: path.to_string_lossy().to_string(),
+                    error: format!("Failed to parse upload response: {}", e),
+                    file_size,
+                    status_code: None,
+                }]));
             }
         };
 
@@ -204,12 +224,18 @@ impl BunkrUploader {
             #[cfg(feature = "ui")]
             if let Some(ui_state) = &ui_state {
                 ui_state.lock().unwrap().add_failed(path.to_string_lossy().to_string(), FailedUploadInfo {
+                    path: path.to_string_lossy().to_string(),
                     error: format!("Upload failed: server returned success=false"),
                     file_size,
                     status_code: None,
                 });
             }
-            return Ok(None);
+            return Ok((None, vec![FailedUploadInfo {
+                path: path.to_string_lossy().to_string(),
+                error: format!("Upload failed: server returned success=false"),
+                file_size,
+                status_code: None,
+            }]));
         }
 
         {
@@ -222,7 +248,7 @@ impl BunkrUploader {
             }
         }
 
-        Ok(res.files.and_then(|f| f.first().map(|x| x.url.clone())))
+        Ok((res.files.and_then(|f| f.first().map(|x| x.url.clone())), vec![]))
     }
 
     async fn upload_chunked_file(
@@ -232,7 +258,7 @@ impl BunkrUploader {
         album_id: Option<&str>,
         ui_state: Option<Arc<Mutex<UIState>>>,
         file_size: u64,
-    ) -> Result<Option<String>> {
+    ) -> Result<(Option<String>, Vec<FailedUploadInfo>)> {
         let total_size = path.metadata()?.len();
         let total_chunks = (total_size as f64 / self.chunk_size as f64).ceil() as u64;
         let file_name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -272,12 +298,18 @@ impl BunkrUploader {
                 #[cfg(feature = "ui")]
                 if let Some(ui_state) = &ui_state {
                     ui_state.lock().unwrap().add_failed(path.to_string_lossy().to_string(), FailedUploadInfo {
+                        path: path.to_string_lossy().to_string(),
                         error: format!("Chunk {} upload failed with status {}: {}", i, status, text),
                         file_size,
                         status_code: Some(status.as_u16()),
                     });
                 }
-                return Ok(None);
+                return Ok((None, vec![FailedUploadInfo {
+                    path: path.to_string_lossy().to_string(),
+                    error: format!("Chunk {} upload failed with status {}: {}", i, status, text),
+                    file_size,
+                    status_code: Some(status.as_u16()),
+                }]));
             }
 
             {
@@ -324,12 +356,18 @@ impl BunkrUploader {
                 #[cfg(feature = "ui")]
                 if let Some(ui_state) = &ui_state {
                     ui_state.lock().unwrap().add_failed(path.to_string_lossy().to_string(), FailedUploadInfo {
+                        path: path.to_string_lossy().to_string(),
                         error: format!("Finish chunks request failed with status {}: {}", status, text),
                         file_size,
                         status_code: Some(status.as_u16()),
                     });
                 }
-                return Ok(None);
+                return Ok((None, vec![FailedUploadInfo {
+                    path: path.to_string_lossy().to_string(),
+                    error: format!("Finish chunks request failed with status {}: {}", status, text),
+                    file_size,
+                    status_code: Some(status.as_u16()),
+                }]));
             }
             let res: UploadResponse = match serde_json::from_str(&text) {
                 Ok(r) => r,
@@ -337,28 +375,40 @@ impl BunkrUploader {
                     #[cfg(feature = "ui")]
                     if let Some(ui_state) = &ui_state {
                         ui_state.lock().unwrap().add_failed(path.to_string_lossy().to_string(), FailedUploadInfo {
+                            path: path.to_string_lossy().to_string(),
                             error: format!("Failed to parse finish chunks response: {}", e),
                             file_size,
                             status_code: None,
                         });
                     }
-                    return Ok(None);
+                    return Ok((None, vec![FailedUploadInfo {
+                        path: path.to_string_lossy().to_string(),
+                        error: format!("Failed to parse finish chunks response: {}", e),
+                        file_size,
+                        status_code: None,
+                    }]));
                 }
             };
             if !res.success {
                 #[cfg(feature = "ui")]
                 if let Some(ui_state) = &ui_state {
                     ui_state.lock().unwrap().add_failed(path.to_string_lossy().to_string(), FailedUploadInfo {
+                        path: path.to_string_lossy().to_string(),
                         error: format!("Finish chunks failed: server returned success=false"),
                         file_size,
                         status_code: None,
                     });
                 }
-                return Ok(None);
+                return Ok((None, vec![FailedUploadInfo {
+                    path: path.to_string_lossy().to_string(),
+                    error: format!("Finish chunks failed: server returned success=false"),
+                    file_size,
+                    status_code: None,
+                }]));
             }
-            Ok(res.files.and_then(|f| f.first().map(|x| x.url.clone())))
+            Ok((res.files.and_then(|f| f.first().map(|x| x.url.clone())), vec![]))
         } else {
-            Ok(None)
+            Ok((None, vec![]))
         }
     }
 
@@ -369,8 +419,9 @@ impl BunkrUploader {
         batch_size: usize,
         ui_state: Option<Arc<Mutex<UIState>>>,
         config: &Config,
-    ) -> Result<Vec<String>> {
+    ) -> Result<(Vec<String>, Vec<FailedUploadInfo>)> {
         let mut results = vec![];
+        let mut failures = vec![];
 
         // Clone the necessary data to move into the async tasks
         let client = self.client.clone();
@@ -402,16 +453,24 @@ impl BunkrUploader {
                         max_file_size,
                         chunk_size,
                     };
-                    let url = uploader.upload_file(&f, album_id_owned.as_deref(), ui_state.clone(), &config_owned).await.unwrap_or(None);
-                    url
+                    uploader.upload_file(&f, album_id_owned.as_deref(), ui_state.clone(), &config_owned).await
                 }));
             }
 
             let chunk_results = join_all(handles).await;
-            results.extend(chunk_results.into_iter().filter_map(|r| r.ok().flatten()));
+            for r in chunk_results {
+                if let Ok(inner) = r {
+                    if let Ok((url, fails)) = inner {
+                        if let Some(u) = url {
+                            results.push(u);
+                        }
+                        failures.extend(fails);
+                    }
+                }
+            }
         }
 
-        Ok(results)
+        Ok((results, failures))
     }
 
     pub async fn get_albums(&self) -> Result<Vec<Album>> {
