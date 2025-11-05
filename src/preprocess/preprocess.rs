@@ -3,6 +3,7 @@ use anyhow::{Result, anyhow};
 use mime_guess::from_path;
 use std::path::Path;
 use std::process::Command;
+use uuid::Uuid;
 
 pub struct PreprocessResult {
     pub files_to_upload: Vec<String>,
@@ -42,6 +43,12 @@ pub fn cleanup_preprocess(preprocess_id: &str, _original_path: &str, files_to_up
             for file in files_to_upload {
                 let _ = std::fs::remove_file(file);
             }
+            // Try to remove the temp directory if it's empty
+            if let Some(first_file) = files_to_upload.first() {
+                if let Some(parent) = Path::new(first_file).parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
         }
         _ => {
             // Unknown preprocess, do nothing
@@ -54,10 +61,14 @@ fn split_video(path: &str, max_file_size: u64) -> Result<Vec<String>> {
     let stem = p.file_stem().unwrap().to_string_lossy();
     let extension = p.extension().unwrap_or_default().to_string_lossy();
 
-    // Get duration
+    // Create temp directory for split parts
+    let temp_dir = std::env::temp_dir().join(format!("bunkr_split_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir)?;
+
+    let hwaccel = detect_hwaccel();
     let output = Command::new("ffprobe")
         .args(&[
-            "-v", "error",
+            "-v", "quiet",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             path
@@ -74,17 +85,30 @@ fn split_video(path: &str, max_file_size: u64) -> Result<Vec<String>> {
     let parts = (size as f64 / max_file_size as f64).ceil() as u32;
     let segment_time = duration / parts as f64;
 
-    let output_pattern = format!("{}_part_%03d.{}", stem, extension);
+    let output_pattern = temp_dir.join(format!("{}_part_%03d.{}", stem, extension)).to_string_lossy().to_string();
+
+    // Build ffmpeg args
+    let mut args = vec![];
+    if let Some(accel) = hwaccel {
+        args.push("-hwaccel".to_string());
+        args.push(accel);
+    }
+    args.push("-loglevel".to_string());
+    args.push("quiet".to_string());
+    args.push("-i".to_string());
+    args.push(path.to_string());
+    args.push("-f".to_string());
+    args.push("segment".to_string());
+    args.push("-segment_time".to_string());
+    args.push(segment_time.to_string());
+    args.push("-c".to_string());
+    args.push("copy".to_string());
+    args.push("-reset_timestamps".to_string());
+    args.push("1".to_string());
+    args.push(output_pattern);
 
     let status = Command::new("ffmpeg")
-        .args(&[
-            "-i", path,
-            "-f", "segment",
-            "-segment_time", &segment_time.to_string(),
-            "-c", "copy",
-            "-reset_timestamps", "1",
-            &output_pattern
-        ])
+        .args(&args)
         .status()?;
     if !status.success() {
         return Err(anyhow!("Failed to split video"));
@@ -92,7 +116,7 @@ fn split_video(path: &str, max_file_size: u64) -> Result<Vec<String>> {
 
     let mut result = vec![];
     for i in 0..parts {
-        let part_path = format!("{}_part_{:03}.{}", stem, i, extension);
+        let part_path = temp_dir.join(format!("{}_part_{:03}.{}", stem, i, extension)).to_string_lossy().to_string();
         // Check if file exists and size <= max_file_size
         if let Ok(meta) = std::fs::metadata(&part_path) {
             if meta.len() <= max_file_size {
@@ -105,4 +129,24 @@ fn split_video(path: &str, max_file_size: u64) -> Result<Vec<String>> {
     }
 
     Ok(result)
+}
+
+fn detect_hwaccel() -> Option<String> {
+    let output = Command::new("ffmpeg").arg("-hwaccels").output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            if let Some(pos) = lines.iter().position(|l| l.contains("Hardware acceleration methods:")) {
+                for line in lines.iter().skip(pos + 1) {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && trimmed != "none" {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }
