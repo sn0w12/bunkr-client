@@ -9,7 +9,7 @@ use ratatui::{
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 };
 use std::io;
 
@@ -198,22 +198,24 @@ pub fn start_ui(ui_state: Arc<Mutex<UIState>>) -> (std::thread::JoinHandle<()>, 
         while running_clone.load(Ordering::Relaxed) {
             if event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
                 if let Ok(Event::Key(key_event)) = event::read() {
-                    match key_event.code {
-                        KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            running_clone.store(false, Ordering::Relaxed);
-                            break;
-                        }
-                        KeyCode::Up => {
-                            let selected = ui.table_state.selected().unwrap_or(0);
-                            if selected > 0 {
-                                ui.table_state.select(Some(selected - 1));
+                    if key_event.kind == KeyEventKind::Press || key_event.kind == KeyEventKind::Repeat {
+                        match key_event.code {
+                            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                                running_clone.store(false, Ordering::Relaxed);
+                                break;
                             }
+                            KeyCode::Up => {
+                                let selected = ui.table_state.selected().unwrap_or(0);
+                                if selected > 0 {
+                                    ui.table_state.select(Some(selected - 1));
+                                }
+                            }
+                            KeyCode::Down => {
+                                let selected = ui.table_state.selected().unwrap_or(0);
+                                ui.table_state.select(Some(selected + 1));
+                            }
+                            _ => {}
                         }
-                        KeyCode::Down => {
-                            let selected = ui.table_state.selected().unwrap_or(0);
-                            ui.table_state.select(Some(selected + 1));
-                        }
-                        _ => {}
                     }
                 }
             }
