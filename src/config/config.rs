@@ -134,10 +134,12 @@ impl Config {
     }
 
     pub fn print_all(&self) {
+        println!("Key                    Value     | Default");
+        println!("─────────────────────────────────────────");
         for key in ConfigKey::all() {
             let current = key.get(self);
             let default = key.default();
-            println!("{}: {} | {}", key.as_str(), current, default);
+            println!("{:<22} {:<9} | \x1b[3m{}\x1b[0m", key.as_str(), current, default);
         }
     }
 
