@@ -1,0 +1,232 @@
+use std::{collections::HashMap, time::Instant, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, Paragraph, Table, Row, TableState},
+    Terminal,
+};
+use crossterm::{
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event, KeyCode, KeyModifiers},
+};
+use std::io;
+
+#[derive(Clone)]
+pub struct FailedUploadInfo {
+    pub error: String,
+    pub file_size: u64,
+    pub status_code: Option<u16>,
+}
+
+#[derive(Clone)]
+pub enum UploadStatus {
+    Ongoing(f64),
+    Completed,
+    Failed(FailedUploadInfo),
+}
+
+pub struct UIState {
+    pub total_files: usize,
+    pub uploaded_files: usize,
+    pub uploaded_bytes: u64,
+    pub start_time: Instant,
+    pub all_uploads: HashMap<String, UploadStatus>,
+    pub album_id: Option<String>,
+}
+
+impl UIState {
+    pub fn new(total_files: usize, album_id: Option<String>) -> Self {
+        Self {
+            total_files,
+            uploaded_files: 0,
+            uploaded_bytes: 0,
+            start_time: Instant::now(),
+            all_uploads: HashMap::new(),
+            album_id,
+        }
+    }
+
+    pub fn add_current(&mut self, name: String, progress: f64) {
+        self.all_uploads.insert(name, UploadStatus::Ongoing(progress));
+    }
+
+    pub fn update_progress(&mut self, name: &str, progress: f64) {
+        if let Some(UploadStatus::Ongoing(ref mut p)) = self.all_uploads.get_mut(name) {
+            *p = progress;
+        }
+    }
+
+    pub fn remove_current(&mut self, name: &str) {
+        self.all_uploads.insert(name.to_string(), UploadStatus::Completed);
+        self.uploaded_files += 1;
+    }
+
+    pub fn add_uploaded_bytes(&mut self, bytes: u64) {
+        self.uploaded_bytes += bytes;
+    }
+
+    pub fn add_failed(&mut self, name: String, info: FailedUploadInfo) {
+        self.all_uploads.insert(name, UploadStatus::Failed(info));
+    }
+}
+
+
+
+pub struct UI {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    table_state: TableState,
+    previous_row_count: usize,
+}
+
+impl UI {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+        Ok(Self { terminal, table_state: TableState::default(), previous_row_count: 0 })
+    }
+
+    pub fn draw(&mut self, state: &UIState) -> Result<(), Box<dyn std::error::Error>> {
+        self.terminal.draw(|f| {
+            let size = f.area();
+            let speed = if state.start_time.elapsed().as_secs_f64() > 0.0 { state.uploaded_bytes as f64 / state.start_time.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 };
+            let header_text = if let Some(album) = &state.album_id {
+                format!("Bunkr Uploader | Album: {} | Uploaded: {}/{} | Speed: {:.2} MB/s", album, state.uploaded_files, state.total_files, speed)
+            } else {
+                format!("Bunkr Uploader | Uploaded: {}/{} | Speed: {:.2} MB/s", state.uploaded_files, state.total_files, speed)
+            };
+            let header = Paragraph::new(header_text)
+                .block(Block::default().borders(Borders::ALL).title("Header"))
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+            let header_height = 3;
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(header_height), Constraint::Min(0)])
+                .split(size);
+
+            f.render_widget(header, chunks[0]);
+
+            let list_area = chunks[1];
+
+            let mut all_items_vec: Vec<(&String, &UploadStatus)> = state.all_uploads.iter().collect();
+            all_items_vec.sort_by(|a, b| a.0.cmp(b.0));
+
+            let current_row_count = all_items_vec.len();
+
+            let rows: Vec<Row> = all_items_vec.iter().map(|(name, status)| {
+                let file_name = std::path::Path::new(name).file_name().unwrap_or(std::ffi::OsStr::new(name)).to_string_lossy();
+                match status {
+                    UploadStatus::Ongoing(progress) => {
+                        Row::new(vec![
+                            file_name.to_string(),
+                            format!("{:.0}%", progress * 100.0),
+                            "Ongoing".to_string(),
+                        ])
+                    }
+                    UploadStatus::Completed => {
+                        Row::new(vec![
+                            file_name.to_string(),
+                            "100%".to_string(),
+                            "Completed".to_string(),
+                        ])
+                    }
+                    UploadStatus::Failed(info) => {
+                        let size_str = if info.file_size < 1024 {
+                            format!("{} B", info.file_size)
+                        } else if info.file_size < 1024 * 1024 {
+                            format!("{:.1} KB", info.file_size as f64 / 1024.0)
+                        } else {
+                            format!("{:.1} MB", info.file_size as f64 / (1024.0 * 1024.0))
+                        };
+                        let status_str = if let Some(code) = info.status_code {
+                            format!(" (HTTP {})", code)
+                        } else {
+                            String::new()
+                        };
+                        Row::new(vec![
+                            file_name.to_string(),
+                            size_str,
+                            format!("Failed{}: {}", status_str, info.error),
+                        ])
+                    }
+                }
+            }).collect();
+
+            let widths = [
+                Constraint::Percentage(50),
+                Constraint::Percentage(20),
+                Constraint::Percentage(30),
+            ];
+
+            let table = Table::new(rows, widths)
+                .block(Block::default().borders(Borders::ALL).title("Uploads"))
+                .header(
+                    Row::new(vec!["File", "Progress/Size", "Status"])
+                        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                )
+                .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+            if let Some(selected) = self.table_state.selected() {
+                if selected == self.previous_row_count.saturating_sub(1) && current_row_count > self.previous_row_count {
+                    self.table_state.select(Some(current_row_count - 1));
+                }
+            }
+
+            self.previous_row_count = current_row_count;
+
+            f.render_stateful_widget(table, list_area, &mut self.table_state);
+        })?;
+        Ok(())
+    }
+
+    pub fn restore(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        disable_raw_mode()?;
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+}
+
+pub fn start_ui(ui_state: Arc<Mutex<UIState>>) -> (std::thread::JoinHandle<()>, Arc<AtomicBool>) {
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    let ui_state_clone = ui_state.clone();
+    let handle = std::thread::spawn(move || {
+        let mut ui = UI::new().unwrap();
+        while running_clone.load(Ordering::Relaxed) {
+            if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+                if let Ok(Event::Key(key_event)) = event::read() {
+                    match key_event.code {
+                        KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                            running_clone.store(false, Ordering::Relaxed);
+                            break;
+                        }
+                        KeyCode::Up => {
+                            let selected = ui.table_state.selected().unwrap_or(0);
+                            if selected > 0 {
+                                ui.table_state.select(Some(selected - 1));
+                            }
+                        }
+                        KeyCode::Down => {
+                            let selected = ui.table_state.selected().unwrap_or(0);
+                            ui.table_state.select(Some(selected + 1));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            {
+                let state = ui_state_clone.lock().unwrap();
+                ui.draw(&state).unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        ui.restore().unwrap();
+    });
+    (handle, running)
+}
