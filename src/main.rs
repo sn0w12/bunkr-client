@@ -136,6 +136,10 @@ async fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("No files to upload."));
             }
 
+            let total_bytes: u64 = all_files.iter()
+                .filter_map(|f| std::fs::metadata(f).ok().map(|m| m.len()))
+                .sum();
+
             let token = core::utils::get_token(cli.token)?;
 
             let uploader = BunkrUploader::new(token).await?;
@@ -151,7 +155,7 @@ async fn main() -> Result<()> {
             };
 
             #[cfg(feature = "ui")]
-            let ui_state = Arc::new(std::sync::Mutex::new(UIState::new(all_files.len(), album_id.clone())));
+            let ui_state = Arc::new(std::sync::Mutex::new(UIState::new(all_files.len(), album_id.clone(), total_bytes)));
             #[cfg(feature = "ui")]
             let (ui_handle, running) = start_ui(ui_state.clone());
 

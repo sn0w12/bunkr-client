@@ -31,6 +31,7 @@ pub struct UIState {
     pub total_files: usize,
     pub uploaded_files: usize,
     pub uploaded_bytes: u64,
+    pub total_bytes: u64,
     pub start_time: Instant,
     pub all_uploads: HashMap<String, UploadStatus>,
     pub album_id: Option<String>,
@@ -38,11 +39,12 @@ pub struct UIState {
 }
 
 impl UIState {
-    pub fn new(total_files: usize, album_id: Option<String>) -> Self {
+    pub fn new(total_files: usize, album_id: Option<String>, total_bytes: u64) -> Self {
         Self {
             total_files,
             uploaded_files: 0,
             uploaded_bytes: 0,
+            total_bytes,
             start_time: Instant::now(),
             all_uploads: HashMap::new(),
             album_id,
@@ -107,10 +109,26 @@ impl UI {
         self.terminal.draw(|f| {
             let size = f.area();
             let speed = if state.start_time.elapsed().as_secs_f64() > 0.0 { state.uploaded_bytes as f64 / state.start_time.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 };
-            let header_text = if let Some(album) = &state.album_id {
-                format!("Bunkr Uploader | Album: {} | Uploaded: {}/{} | Speed: {:.2} MB/s", album, state.uploaded_files, state.total_files, speed)
+
+            let remaining_bytes: u64 = state.total_bytes.saturating_sub(state.uploaded_bytes);
+
+            let eta_str = if remaining_bytes > 0 && speed > 0.0 {
+                let time_left_seconds = remaining_bytes as f64 / (speed * 1_000_000.0);
+                if time_left_seconds < 60.0 {
+                    format!(" | ETA: {:.0}s", time_left_seconds)
+                } else if time_left_seconds < 3600.0 {
+                    format!(" | ETA: {:.0}m", time_left_seconds / 60.0)
+                } else {
+                    format!(" | ETA: {:.1}h", time_left_seconds / 3600.0)
+                }
             } else {
-                format!("Bunkr Uploader | Uploaded: {}/{} | Speed: {:.2} MB/s", state.uploaded_files, state.total_files, speed)
+                String::new()
+            };
+
+            let header_text = if let Some(album) = &state.album_id {
+                format!("Bunkr Uploader | Album: {} | Uploaded: {}/{} | Speed: {:.2} MB/s{}", album, state.uploaded_files, state.total_files, speed, eta_str)
+            } else {
+                format!("Bunkr Uploader | Uploaded: {}/{} | Speed: {:.2} MB/s{}", state.uploaded_files, state.total_files, speed, eta_str)
             };
             let header = Paragraph::new(header_text)
                 .block(Block::default().borders(Borders::ALL).title("Header"))
