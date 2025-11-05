@@ -154,7 +154,7 @@ impl BunkrUploader {
         #[cfg(feature = "ui")]
         if let Some(ui_state) = &ui_state {
             let mut state = ui_state.lock().unwrap();
-            state.add_current(file_name.clone(), 0.0);
+            state.add_current(file_name.clone(), 0.0, size);
         }
 
         let part = multipart::Part::bytes(buf).file_name(file_name.clone()).mime_str(mime)?;
@@ -240,7 +240,7 @@ impl BunkrUploader {
         #[cfg(feature = "ui")]
         if let Some(ui_state) = &ui_state {
             let mut state = ui_state.lock().unwrap();
-            state.add_current(file_name.clone(), 0.0);
+            state.add_current(file_name.clone(), 0.0, total_size);
         }
 
         let uuid = Uuid::new_v4();

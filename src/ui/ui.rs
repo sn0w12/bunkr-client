@@ -34,6 +34,7 @@ pub struct UIState {
     pub start_time: Instant,
     pub all_uploads: HashMap<String, UploadStatus>,
     pub album_id: Option<String>,
+    pub file_sizes: HashMap<String, u64>,
 }
 
 impl UIState {
@@ -45,11 +46,13 @@ impl UIState {
             start_time: Instant::now(),
             all_uploads: HashMap::new(),
             album_id,
+            file_sizes: HashMap::new(),
         }
     }
 
-    pub fn add_current(&mut self, name: String, progress: f64) {
-        self.all_uploads.insert(name, UploadStatus::Ongoing(progress));
+    pub fn add_current(&mut self, name: String, progress: f64, size: u64) {
+        self.all_uploads.insert(name.clone(), UploadStatus::Ongoing(progress));
+        self.file_sizes.insert(name, size);
     }
 
     pub fn update_progress(&mut self, name: &str, progress: f64) {
@@ -72,7 +75,17 @@ impl UIState {
     }
 }
 
-
+fn format_size(size: u64) -> String {
+    if size >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", size as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if size >= 1024 * 1024 {
+        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+    } else if size >= 1024 {
+        format!("{:.1} KB", size as f64 / 1024.0)
+    } else {
+        format!("{} B", size)
+    }
+}
 
 pub struct UI {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -120,53 +133,37 @@ impl UI {
 
             let rows: Vec<Row> = all_items_vec.iter().map(|(name, status)| {
                 let file_name = std::path::Path::new(name).file_name().unwrap_or(std::ffi::OsStr::new(name)).to_string_lossy();
-                match status {
-                    UploadStatus::Ongoing(progress) => {
-                        Row::new(vec![
-                            file_name.to_string(),
-                            format!("{:.0}%", progress * 100.0),
-                            "Ongoing".to_string(),
-                        ])
-                    }
-                    UploadStatus::Completed => {
-                        Row::new(vec![
-                            file_name.to_string(),
-                            "100%".to_string(),
-                            "Completed".to_string(),
-                        ])
-                    }
+                let size = match status {
+                    UploadStatus::Failed(info) => info.file_size,
+                    _ => *state.file_sizes.get(*name).unwrap_or(&0),
+                };
+                let size_str = format_size(size);
+                let (progress_str, status_str) = match status {
+                    UploadStatus::Ongoing(progress) => (format!("{:.0}%", progress * 100.0), "Ongoing".to_string()),
+                    UploadStatus::Completed => ("100%".to_string(), "Completed".to_string()),
                     UploadStatus::Failed(info) => {
-                        let size_str = if info.file_size < 1024 {
-                            format!("{} B", info.file_size)
-                        } else if info.file_size < 1024 * 1024 {
-                            format!("{:.1} KB", info.file_size as f64 / 1024.0)
-                        } else {
-                            format!("{:.1} MB", info.file_size as f64 / (1024.0 * 1024.0))
-                        };
-                        let status_str = if let Some(code) = info.status_code {
+                        let status_str_inner = if let Some(code) = info.status_code {
                             format!(" (HTTP {})", code)
                         } else {
                             String::new()
                         };
-                        Row::new(vec![
-                            file_name.to_string(),
-                            size_str,
-                            format!("Failed{}: {}", status_str, info.error),
-                        ])
+                        ("".to_string(), format!("Failed{}: {}", status_str_inner, info.error))
                     }
-                }
+                };
+                Row::new(vec![file_name.to_string(), size_str, progress_str, status_str])
             }).collect();
 
             let widths = [
-                Constraint::Percentage(50),
-                Constraint::Percentage(20),
-                Constraint::Percentage(30),
+                Constraint::Percentage(35),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+                Constraint::Percentage(35),
             ];
 
             let table = Table::new(rows, widths)
                 .block(Block::default().borders(Borders::ALL).title("Uploads"))
                 .header(
-                    Row::new(vec!["File", "Progress/Size", "Status"])
+                    Row::new(vec!["File", "Size", "Progress", "Status"])
                         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
                 )
                 .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -199,7 +196,7 @@ pub fn start_ui(ui_state: Arc<Mutex<UIState>>) -> (std::thread::JoinHandle<()>, 
     let handle = std::thread::spawn(move || {
         let mut ui = UI::new().unwrap();
         while running_clone.load(Ordering::Relaxed) {
-            if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+            if event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
                 if let Ok(Event::Key(key_event)) = event::read() {
                     match key_event.code {
                         KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -224,7 +221,7 @@ pub fn start_ui(ui_state: Arc<Mutex<UIState>>) -> (std::thread::JoinHandle<()>, 
                 let state = ui_state_clone.lock().unwrap();
                 ui.draw(&state).unwrap();
             }
-            std::thread::sleep(std::time::Duration::from_millis(400));
+            std::thread::sleep(std::time::Duration::from_millis(16));
         }
         ui.restore().unwrap();
     });
