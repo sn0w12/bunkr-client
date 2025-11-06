@@ -13,6 +13,7 @@ use crossterm::{
 };
 use std::io;
 use crate::core::types::FailedUploadInfo;
+use webbrowser;
 
 #[derive(Clone)]
 pub enum UploadStatus {
@@ -30,6 +31,7 @@ pub struct UIState {
     pub all_uploads: HashMap<String, UploadStatus>,
     pub album_id: Option<String>,
     pub file_sizes: HashMap<String, u64>,
+    pub completed_urls: HashMap<String, String>,
 }
 
 impl UIState {
@@ -43,6 +45,7 @@ impl UIState {
             all_uploads: HashMap::new(),
             album_id,
             file_sizes: HashMap::new(),
+            completed_urls: HashMap::new(),
         }
     }
 
@@ -57,9 +60,12 @@ impl UIState {
         }
     }
 
-    pub fn remove_current(&mut self, name: &str) {
+    pub fn remove_current(&mut self, name: &str, url: Option<&str>) {
         self.all_uploads.insert(name.to_string(), UploadStatus::Completed);
         self.uploaded_files += 1;
+        if let Some(url) = url {
+            self.completed_urls.insert(name.to_string(), url.to_string());
+        }
     }
 
     pub fn add_uploaded_bytes(&mut self, bytes: u64) {
@@ -150,32 +156,36 @@ impl UI {
                     _ => *state.file_sizes.get(*name).unwrap_or(&0),
                 };
                 let size_str = format_size(size);
-                let (progress_str, status_str) = match status {
-                    UploadStatus::Ongoing(progress) => (format!("{:.0}%", progress * 100.0), "Ongoing".to_string()),
-                    UploadStatus::Completed => ("100%".to_string(), "Completed".to_string()),
+                let (progress_str, status_str, url_str) = match status {
+                    UploadStatus::Ongoing(progress) => (format!("{:.0}%", progress * 100.0), "Ongoing".to_string(), "".to_string()),
+                    UploadStatus::Completed => {
+                        let url = state.completed_urls.get(*name).cloned().unwrap_or_else(|| "".to_string());
+                        ("100%".to_string(), "Completed".to_string(), url)
+                    }
                     UploadStatus::Failed(info) => {
                         let status_str_inner = if let Some(code) = info.status_code {
                             format!(" (HTTP {})", code)
                         } else {
                             String::new()
                         };
-                        ("".to_string(), format!("Failed{}: {}", status_str_inner, info.error))
+                        ("".to_string(), format!("Failed{}: {}", status_str_inner, info.error), "".to_string())
                     }
                 };
-                Row::new(vec![file_name.to_string(), size_str, progress_str, status_str])
+                Row::new(vec![file_name.to_string(), size_str, progress_str, status_str, url_str])
             }).collect();
 
             let widths = [
-                Constraint::Percentage(35),
-                Constraint::Percentage(15),
-                Constraint::Percentage(15),
-                Constraint::Percentage(35),
+                Constraint::Percentage(25),
+                Constraint::Percentage(12),
+                Constraint::Percentage(12),
+                Constraint::Percentage(25),
+                Constraint::Percentage(26),
             ];
 
             let table = Table::new(rows, widths)
                 .block(Block::default().borders(Borders::ALL).title("Uploads"))
                 .header(
-                    Row::new(vec!["File", "Size", "Progress", "Status"])
+                    Row::new(vec!["File", "Size", "Progress", "Status", "URL"])
                         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
                 )
                 .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -225,6 +235,21 @@ pub fn start_ui(ui_state: Arc<Mutex<UIState>>) -> (std::thread::JoinHandle<()>, 
                             KeyCode::Down => {
                                 let selected = ui.table_state.selected().unwrap_or(0);
                                 ui.table_state.select(Some(selected + 1));
+                            }
+                            KeyCode::Enter => {
+                                let state = ui_state_clone.lock().unwrap();
+                                let mut all_items_vec: Vec<(&String, &UploadStatus)> = state.all_uploads.iter().collect();
+                                all_items_vec.sort_by(|a, b| a.0.cmp(b.0));
+                                if let Some(selected) = ui.table_state.selected() {
+                                    if selected < all_items_vec.len() {
+                                        let (name, status) = &all_items_vec[selected];
+                                        if let UploadStatus::Completed = status {
+                                            if let Some(url) = state.completed_urls.get(*name) {
+                                                let _ = webbrowser::open(url);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             _ => {}
                         }

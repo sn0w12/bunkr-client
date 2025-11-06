@@ -237,17 +237,19 @@ impl BunkrUploader {
             }]));
         }
 
+        let url = res.files.as_ref().and_then(|f| f.first().map(|x| x.url.clone()));
+
         {
             #[cfg(feature = "ui")]
             if let Some(ui_state) = &ui_state {
                 let mut state = ui_state.lock().unwrap();
                 state.update_progress(&file_name, 1.0);
                 state.add_uploaded_bytes(size);
-                state.remove_current(&file_name);
+                state.remove_current(&file_name, url.as_deref());
             }
         }
 
-        Ok((res.files.and_then(|f| f.first().map(|x| x.url.clone())), vec![]))
+        Ok((url, vec![]))
     }
 
     async fn upload_chunked_file(
@@ -322,17 +324,9 @@ impl BunkrUploader {
             }
         }
 
-        {
-            #[cfg(feature = "ui")]
-            if let Some(ui_state) = &ui_state {
-                let mut state = ui_state.lock().unwrap();
-                state.remove_current(&file_name);
-            }
-        }
-
-        if let Some(album_id) = album_id {
+        let url = if let Some(album_id) = album_id {
             let finish_url = format!("{}/finishchunks", self.upload_url);
-            let original = file_name;
+            let original = file_name.clone();
             let body = json!({
                 "files": [{
                     "uuid": uuid.to_string(),
@@ -405,10 +399,20 @@ impl BunkrUploader {
                     status_code: None,
                 }]));
             }
-            Ok((res.files.and_then(|f| f.first().map(|x| x.url.clone())), vec![]))
+            res.files.and_then(|f| f.first().map(|x| x.url.clone()))
         } else {
-            Ok((None, vec![]))
+            None
+        };
+
+        {
+            #[cfg(feature = "ui")]
+            if let Some(ui_state) = &ui_state {
+                let mut state = ui_state.lock().unwrap();
+                state.remove_current(&file_name, url.as_deref());
+            }
         }
+
+        Ok((url, vec![]))
     }
 
     pub async fn upload_files(
