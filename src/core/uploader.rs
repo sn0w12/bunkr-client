@@ -21,7 +21,6 @@ impl BunkrUploader {
     pub async fn new(token: String) -> Result<Self> {
         let client = Client::new();
 
-        // Verify token
         let response = client
             .post("https://dash.bunkr.cr/api/tokens/verify")
             .form(&[("token", token.clone())])
@@ -44,7 +43,6 @@ impl BunkrUploader {
             return Err(anyhow!("Invalid API token"));
         }
 
-        // Fetch configuration
         let response = client
             .get("https://dash.bunkr.cr/api/check")
             .header("token", &token)
@@ -83,7 +81,8 @@ impl BunkrUploader {
             }
         };
 
-        let max_file_size = parse_size(&config.maxSize)?;
+        // 95% of max size to account for overhead
+        let max_file_size = parse_size(&config.maxSize)? * 0.95 as u64;
         let chunk_size = parse_size(&config.chunkSize.default)?;
 
         let mut headers = reqwest::header::HeaderMap::new();
