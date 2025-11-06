@@ -6,7 +6,7 @@ use mime_guess::from_path;
 use reqwest::{Client, multipart};
 use serde_json::json;
 use std::{path::Path, fs::File, io::Read, sync::{Arc, Mutex}};
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use uuid::Uuid;
 
 pub struct BunkrUploader {
@@ -431,41 +431,34 @@ impl BunkrUploader {
         let album_id_owned = album_id.map(|s| s.to_string());
         let config_owned = config.clone();
 
-        for chunk in files.chunks(batch_size) {
-            let mut handles = vec![];
+        let stream = stream::iter(files.into_iter().map(|f| {
+            let client = client.clone();
+            let headers = headers.clone();
+            let upload_url = upload_url.clone();
+            let album_id_owned = album_id_owned.clone();
+            let ui_state = ui_state.clone();
             let config_owned = config_owned.clone();
 
-            for f in chunk {
-                let f = f.clone();
-                let client = client.clone();
-                let headers = headers.clone();
-                let upload_url = upload_url.clone();
-                let album_id_owned = album_id_owned.clone();
-                let ui_state = ui_state.clone();
-                let config_owned = config_owned.clone();
-
-                handles.push(tokio::spawn(async move {
-                    let uploader = BunkrUploader {
-                        client,
-                        headers,
-                        upload_url,
-                        max_file_size,
-                        chunk_size,
-                    };
-                    uploader.upload_file(&f, album_id_owned.as_deref(), ui_state.clone(), &config_owned).await
-                }));
+            async move {
+                let uploader = BunkrUploader {
+                    client,
+                    headers,
+                    upload_url,
+                    max_file_size,
+                    chunk_size,
+                };
+                uploader.upload_file(&f, album_id_owned.as_deref(), ui_state, &config_owned).await
             }
+        })).buffer_unordered(batch_size);
 
-            let chunk_results = join_all(handles).await;
-            for r in chunk_results {
-                if let Ok(inner) = r {
-                    if let Ok((url, fails)) = inner {
-                        if let Some(u) = url {
-                            results.push(u);
-                        }
-                        failures.extend(fails);
-                    }
+        let upload_results: Vec<Result<(Option<String>, Vec<FailedUploadInfo>)>> = stream.collect().await;
+
+        for r in upload_results {
+            if let Ok((url, fails)) = r {
+                if let Some(u) = url {
+                    results.push(u);
                 }
+                failures.extend(fails);
             }
         }
 
