@@ -1,6 +1,9 @@
 use crate::{config::bunkr_config::BunkrConfig, config::config::Config, preprocess::preprocess::cleanup_preprocess, core::types::*, core::utils::parse_size};
 #[cfg(feature = "ui")]
 use crate::ui::ui::UIState;
+#[cfg(not(feature = "ui"))]
+#[derive(Clone)]
+pub struct UIState;
 use anyhow::{Result, anyhow};
 use mime_guess::from_path;
 use reqwest::{Client, multipart};

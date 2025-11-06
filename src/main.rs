@@ -8,9 +8,11 @@ use clap::{Parser, Subcommand};
 use core::uploader::BunkrUploader;
 #[cfg(feature = "ui")]
 use crate::ui::ui::{UIState, start_ui};
+#[cfg(not(feature = "ui"))]
+use crate::core::uploader::UIState;
 use anyhow::Result;
 use keyring::Entry;
-use std::{path::Path, sync::Arc, io::Write, fs::OpenOptions};
+use std::{path::Path, sync::{Arc, Mutex}, io::Write, fs::OpenOptions};
 #[cfg(feature = "ui")]
 use crossterm::{cursor, terminal, ExecutableCommand};
 #[cfg(feature = "ui")]
@@ -155,11 +157,13 @@ async fn main() -> Result<()> {
             };
 
             #[cfg(feature = "ui")]
-            let ui_state = Arc::new(std::sync::Mutex::new(UIState::new(all_files.len(), album_id.clone(), total_bytes)));
+            let ui_state = Some(Arc::new(Mutex::new(UIState::new(all_files.len(), album_id.clone(), total_bytes))));
+            #[cfg(not(feature = "ui"))]
+            let ui_state: Option<Arc<Mutex<UIState>>> = None;
             #[cfg(feature = "ui")]
-            let (ui_handle, running) = start_ui(ui_state.clone());
+            let (ui_handle, running) = start_ui(ui_state.as_ref().unwrap().clone());
 
-            let (_urls, failures) = uploader.upload_files(all_files, album_id.as_deref(), batch_size, #[cfg(feature = "ui")] Some(ui_state), &config).await?;
+            let (_urls, failures) = uploader.upload_files(all_files, album_id.as_deref(), batch_size, ui_state, &config).await?;
 
             #[cfg(feature = "ui")]
             {
