@@ -10,6 +10,7 @@ use reqwest::{Client, multipart};
 use serde_json::json;
 use std::{path::Path, fs::File, io::Read, sync::{Arc, Mutex}};
 use futures::stream::{self, StreamExt};
+use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
 pub struct BunkrUploader {
@@ -21,14 +22,37 @@ pub struct BunkrUploader {
 }
 
 impl BunkrUploader {
+    async fn retry_with_backoff<F, Fut>(mut f: F, max_retries: u32) -> Result<reqwest::Response, reqwest::Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+    {
+        let mut delay = Duration::from_secs(1);
+        for attempt in 0..=max_retries {
+            match f().await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    if attempt == max_retries {
+                        return Err(e);
+                    }
+                    eprintln!("Attempt {} failed: {}, retrying in {:?}", attempt + 1, e, delay);
+                    sleep(delay).await;
+                    delay = delay.saturating_mul(2);
+                }
+            }
+        }
+        unreachable!()
+    }
+
     pub async fn new(token: String) -> Result<Self> {
         let client = Client::new();
 
-        let response = client
-            .post("https://dash.bunkr.cr/api/tokens/verify")
-            .form(&[("token", token.clone())])
-            .send()
-            .await?;
+        let response = Self::retry_with_backoff(|| {
+            client
+                .post("https://dash.bunkr.cr/api/tokens/verify")
+                .form(&[("token", token.clone())])
+                .send()
+        }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
@@ -46,11 +70,12 @@ impl BunkrUploader {
             return Err(anyhow!("Invalid API token"));
         }
 
-        let response = client
-            .get("https://dash.bunkr.cr/api/check")
-            .header("token", &token)
-            .send()
-            .await?;
+        let response = Self::retry_with_backoff(|| {
+            client
+                .get("https://dash.bunkr.cr/api/check")
+                .header("token", &token)
+                .send()
+        }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
@@ -65,11 +90,12 @@ impl BunkrUploader {
             }
         };
 
-        let response = client
-            .get("https://dash.bunkr.cr/api/node")
-            .header("token", &token)
-            .send()
-            .await?;
+        let response = Self::retry_with_backoff(|| {
+            client
+                .get("https://dash.bunkr.cr/api/node")
+                .header("token", &token)
+                .send()
+        }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
@@ -186,21 +212,25 @@ impl BunkrUploader {
             state.add_current(path.to_string_lossy().to_string(), 0.0, size);
         }
 
-        let part = multipart::Part::bytes(buf).file_name(file_name.clone()).mime_str(mime)?;
-        let form = multipart::Form::new().part("files[]", part);
+        let headers = self.headers.clone();
+        let headers = if let Some(album_id) = album_id {
+            let mut h = headers;
+            h.insert("albumid", reqwest::header::HeaderValue::from_str(album_id)?);
+            h
+        } else {
+            headers
+        };
 
-        let mut headers = self.headers.clone();
-        if let Some(album_id) = album_id {
-            headers.insert("albumid", reqwest::header::HeaderValue::from_str(album_id)?);
-        }
-
-        let response = self
-            .client
-            .post(&self.upload_url)
-            .headers(headers)
-            .multipart(form)
-            .send()
-            .await?;
+        let response = Self::retry_with_backoff(|| {
+            let part = multipart::Part::bytes(buf.clone()).file_name(file_name.clone()).mime_str(mime).unwrap();
+            let form = multipart::Form::new().part("files[]", part);
+            self
+                .client
+                .post(&self.upload_url)
+                .headers(headers.clone())
+                .multipart(form)
+                .send()
+        }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
@@ -300,21 +330,20 @@ impl BunkrUploader {
             let bytes_read = file.read(&mut buf)?;
             buf.truncate(bytes_read);
 
-            let part = multipart::Part::bytes(buf)
-                .file_name(file_name.clone())
-                .mime_str("application/octet-stream")?;
-
-            let form = multipart::Form::new()
-                .text("dzuuid", uuid.to_string())
-                .text("dzchunkindex", i.to_string())
-                .part("files[]", part);
-
-            let response = self.client
-                .post(&self.upload_url)
-                .headers(self.headers.clone())
-                .multipart(form)
-                .send()
-                .await?;
+            let response = Self::retry_with_backoff(|| {
+                let part = multipart::Part::bytes(buf.clone())
+                    .file_name(file_name.clone())
+                    .mime_str("application/octet-stream").unwrap();
+                let form = multipart::Form::new()
+                    .text("dzuuid", uuid.to_string())
+                    .text("dzchunkindex", i.to_string())
+                    .part("files[]", part);
+                self.client
+                    .post(&self.upload_url)
+                    .headers(self.headers.clone())
+                    .multipart(form)
+                    .send()
+            }, 5).await?;
             let status = response.status();
             if !status.is_success() {
                 let text = response.text().await?;
@@ -359,12 +388,13 @@ impl BunkrUploader {
                     "age": null,
                 }]
             });
-            let response = self.client
-                .post(&finish_url)
-                .headers(self.headers.clone())
-                .json(&body)
-                .send()
-                .await?;
+            let response = Self::retry_with_backoff(|| {
+                self.client
+                    .post(&finish_url)
+                    .headers(self.headers.clone())
+                    .json(&body)
+                    .send()
+            }, 5).await?;
             let status = response.status();
             let text = response.text().await?;
             if !status.is_success() {
@@ -496,12 +526,12 @@ impl BunkrUploader {
         struct AlbumsResponse {
             albums: Vec<Album>,
         }
-        let response = self
-            .client
-            .get("https://dash.bunkr.cr/api/albums")
-            .headers(self.headers.clone())
-            .send()
-            .await?;
+        let response = Self::retry_with_backoff(|| {
+            self.client
+                .get("https://dash.bunkr.cr/api/albums")
+                .headers(self.headers.clone())
+                .send()
+        }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
@@ -536,12 +566,13 @@ impl BunkrUploader {
             "public": public,
         });
 
-        let response = self.client
-            .post("https://dash.bunkr.cr/api/albums")
-            .headers(self.headers.clone())
-            .json(&body)
-            .send()
-            .await?;
+        let response = Self::retry_with_backoff(|| {
+            self.client
+                .post("https://dash.bunkr.cr/api/albums")
+                .headers(self.headers.clone())
+                .json(&body)
+                .send()
+        }, 5).await?;
 
         let status = response.status();
         let text = response.text().await?;
