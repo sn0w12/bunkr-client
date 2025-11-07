@@ -86,6 +86,10 @@ impl UIState {
         self.all_uploads.remove(name);
         self.file_sizes.remove(name);
     }
+
+    pub fn add_to_total_files(&mut self, count: usize) {
+        self.total_files += count;
+    }
 }
 
 fn format_size(size: u64) -> String {

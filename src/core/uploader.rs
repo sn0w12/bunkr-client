@@ -154,6 +154,12 @@ impl BunkrUploader {
         }
 
         let preprocess_result = crate::preprocess::preprocess::preprocess_file(path, self.max_file_size, config)?;
+        #[cfg(feature = "ui")]
+        if let Some(ui_state) = &ui_state {
+            if preprocess_result.files_to_upload.len() > 1 {
+                ui_state.lock().unwrap().add_to_total_files(preprocess_result.files_to_upload.len() - 1);
+            }
+        }
         if preprocess_result.files_to_upload.len() == 1 && preprocess_result.files_to_upload[0] == path {
             #[cfg(feature = "ui")]
             if let Some(ui_state) = &ui_state {
