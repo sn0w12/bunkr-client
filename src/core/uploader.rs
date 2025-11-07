@@ -1,6 +1,6 @@
 use crate::{config::bunkr_config::BunkrConfig, config::config::Config, preprocess::preprocess::cleanup_preprocess, core::types::*, core::utils::parse_size};
 #[cfg(feature = "ui")]
-use crate::ui::ui::UIState;
+use crate::ui::ui::{UIState, UploadStatus};
 #[cfg(not(feature = "ui"))]
 #[derive(Clone)]
 pub struct UIState;
@@ -85,7 +85,7 @@ impl BunkrUploader {
         };
 
         // 95% of max size to account for overhead
-        let max_file_size = parse_size(&config.maxSize)? * 0.95 as u64;
+        let max_file_size = (parse_size(&config.maxSize)? as f64 * 0.95) as u64;
         let chunk_size = parse_size(&config.chunkSize.default)?;
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -121,7 +121,26 @@ impl BunkrUploader {
             }]));
         }
 
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        #[cfg(feature = "ui")]
+        if let Some(ui_state) = &ui_state {
+            ui_state.lock().unwrap().add_preprocessing(path.to_string(), size);
+        }
+
         let preprocess_result = crate::preprocess::preprocess::preprocess_file(path, self.max_file_size, config)?;
+        if preprocess_result.files_to_upload.len() == 1 && preprocess_result.files_to_upload[0] == path {
+            #[cfg(feature = "ui")]
+            if let Some(ui_state) = &ui_state {
+                let mut state = ui_state.lock().unwrap();
+                state.all_uploads.insert(path.to_string(), UploadStatus::Ongoing(0.0));
+            }
+        } else {
+            #[cfg(feature = "ui")]
+            if let Some(ui_state) = &ui_state {
+                let mut state = ui_state.lock().unwrap();
+                state.remove_upload(path);
+            }
+        }
         let mut urls = vec![];
         let mut file_fails = vec![];
         for file_path in &preprocess_result.files_to_upload {
@@ -164,7 +183,7 @@ impl BunkrUploader {
         #[cfg(feature = "ui")]
         if let Some(ui_state) = &ui_state {
             let mut state = ui_state.lock().unwrap();
-            state.add_current(file_name.clone(), 0.0, size);
+            state.add_current(path.to_string_lossy().to_string(), 0.0, size);
         }
 
         let part = multipart::Part::bytes(buf).file_name(file_name.clone()).mime_str(mime)?;
@@ -246,9 +265,9 @@ impl BunkrUploader {
             #[cfg(feature = "ui")]
             if let Some(ui_state) = &ui_state {
                 let mut state = ui_state.lock().unwrap();
-                state.update_progress(&file_name, 1.0);
+                state.update_progress(&path.to_string_lossy(), 1.0);
                 state.add_uploaded_bytes(size);
-                state.remove_current(&file_name, url.as_deref());
+                state.remove_current(&path.to_string_lossy(), url.as_deref());
             }
         }
 
@@ -270,7 +289,7 @@ impl BunkrUploader {
         #[cfg(feature = "ui")]
         if let Some(ui_state) = &ui_state {
             let mut state = ui_state.lock().unwrap();
-            state.add_current(file_name.clone(), 0.0, total_size);
+            state.add_current(path.to_string_lossy().to_string(), 0.0, total_size);
         }
 
         let uuid = Uuid::new_v4();
@@ -321,7 +340,7 @@ impl BunkrUploader {
                 #[cfg(feature = "ui")]
                 if let Some(ui_state) = &ui_state {
                     let mut state = ui_state.lock().unwrap();
-                    state.update_progress(&file_name, progress);
+                    state.update_progress(&path.to_string_lossy(), progress);
                     state.add_uploaded_bytes(bytes_read as u64);
                 }
             }
@@ -411,7 +430,7 @@ impl BunkrUploader {
             #[cfg(feature = "ui")]
             if let Some(ui_state) = &ui_state {
                 let mut state = ui_state.lock().unwrap();
-                state.remove_current(&file_name, url.as_deref());
+                state.remove_current(&path.to_string_lossy(), url.as_deref());
             }
         }
 

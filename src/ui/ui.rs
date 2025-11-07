@@ -17,6 +17,7 @@ use webbrowser;
 
 #[derive(Clone)]
 pub enum UploadStatus {
+    Preprocessing,
     Ongoing(f64),
     Completed,
     Failed(FailedUploadInfo),
@@ -74,6 +75,16 @@ impl UIState {
 
     pub fn add_failed(&mut self, name: String, info: FailedUploadInfo) {
         self.all_uploads.insert(name, UploadStatus::Failed(info));
+    }
+
+    pub fn add_preprocessing(&mut self, name: String, size: u64) {
+        self.file_sizes.insert(name.clone(), size);
+        self.all_uploads.insert(name, UploadStatus::Preprocessing);
+    }
+
+    pub fn remove_upload(&mut self, name: &str) {
+        self.all_uploads.remove(name);
+        self.file_sizes.remove(name);
     }
 }
 
@@ -157,6 +168,7 @@ impl UI {
                 };
                 let size_str = format_size(size);
                 let (progress_str, status_str, url_str) = match status {
+                    UploadStatus::Preprocessing => ("".to_string(), "Preprocessing".to_string(), "".to_string()),
                     UploadStatus::Ongoing(progress) => (format!("{:.0}%", progress * 100.0), "Ongoing".to_string(), "".to_string()),
                     UploadStatus::Completed => {
                         let url = state.completed_urls.get(*name).cloned().unwrap_or_else(|| "".to_string());
