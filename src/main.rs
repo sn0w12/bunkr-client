@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
             #[cfg(feature = "ui")]
             let (ui_handle, running) = start_ui(ui_state.as_ref().unwrap().clone());
 
-            let (_urls, failures) = uploader.upload_files(all_files, album_id.as_deref(), batch_size, ui_state, &config).await?;
+            let (_urls, failures) = uploader.upload_files(all_files, album_id.as_deref(), batch_size, ui_state, Some(&config)).await?;
 
             #[cfg(feature = "ui")]
             {

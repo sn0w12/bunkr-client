@@ -479,7 +479,7 @@ impl BunkrUploader {
         album_id: Option<&str>,
         batch_size: usize,
         ui_state: Option<Arc<Mutex<UIState>>>,
-        config: &Config,
+        config: Option<&Config>,
     ) -> Result<(Vec<String>, Vec<FailedUploadInfo>)> {
         let mut results = vec![];
         let mut failures = vec![];
@@ -491,7 +491,7 @@ impl BunkrUploader {
         let max_file_size = self.max_file_size;
         let chunk_size = self.chunk_size;
         let album_id_owned = album_id.map(|s| s.to_string());
-        let config_owned = config.clone();
+        let config_owned = config.cloned().unwrap_or_else(|| Config::default());
 
         let stream = stream::iter(files.into_iter().map(|f| {
             let client = client.clone();
