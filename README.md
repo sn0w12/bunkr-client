@@ -21,9 +21,43 @@ cd bunkr-uploader
 cargo install --path .
 ```
 
+### As a Library
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+bunkr_uploader = "0.1.0"
+```
+
+To use without CLI features:
+
+```toml
+[dependencies]
+bunkr_uploader = { version = "0.1.0", default-features = false }
+```
+
 ## Usage
 
-### First Time Setup
+### As a Library
+
+```rust
+use bunkr_uploader::{BunkrUploader, Config};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load()?;
+    let uploader = BunkrUploader::new("your_api_token".to_string()).await?;
+
+    // Upload files
+    let files = vec!["file1.jpg".to_string(), "file2.png".to_string()];
+    let (urls, failures) = uploader.upload_files(files, None, 1, None, &config).await?;
+
+    Ok(())
+}
+```
+
+### First Time Setup (CLI)
 
 Save your API token securely:
 

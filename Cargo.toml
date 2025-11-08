@@ -3,8 +3,13 @@ name = "bunkr_uploader"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "bunkr_uploader"
+path = "src/lib.rs"
+
 [features]
-default = ["ui"]
+default = ["cli", "ui"]
+cli = ["clap"]
 ui = ["ratatui", "crossterm", "webbrowser"]
 
 [dependencies]
@@ -14,7 +19,7 @@ serde_json = "1.0"
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
 indicatif = "0.18"
 futures = "0.3"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 mime_guess = "2.0"
 uuid = { version = "1.7", features = ["v4"] }
 anyhow = "1.0"

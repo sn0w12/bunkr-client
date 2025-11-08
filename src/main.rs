@@ -1,15 +1,13 @@
-mod core;
-mod config;
-#[cfg(feature = "ui")]
-mod ui;
-mod preprocess;
-
+#[cfg(feature = "cli")]
 use clap::{Parser, Subcommand};
-use core::uploader::BunkrUploader;
+#[cfg(feature = "cli")]
+use bunkr_uploader::BunkrUploader;
+#[cfg(feature = "cli")]
 #[cfg(feature = "ui")]
-use crate::ui::ui::{UIState, start_ui};
+use bunkr_uploader::ui::ui::{UIState, start_ui};
+#[cfg(feature = "cli")]
 #[cfg(not(feature = "ui"))]
-use crate::core::uploader::UIState;
+use bunkr_uploader::core::uploader::UIState;
 use anyhow::Result;
 use keyring::Entry;
 use std::{path::Path, sync::{Arc, Mutex}, io::Write, fs::OpenOptions};
@@ -18,6 +16,7 @@ use crossterm::{cursor, terminal, ExecutableCommand};
 #[cfg(feature = "ui")]
 use std::io;
 
+#[cfg(feature = "cli")]
 #[derive(Parser)]
 #[command(name = "bunkr_uploader", about = "CLI tool for uploading files to Bunkr.cr")]
 struct Cli {
@@ -39,6 +38,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[cfg(feature = "cli")]
 #[derive(Subcommand)]
 enum Commands {
     /// Save the API token securely
@@ -60,6 +60,7 @@ enum Commands {
     },
 }
 
+#[cfg(feature = "cli")]
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Get configuration value(s)
@@ -74,6 +75,7 @@ enum ConfigAction {
     },
 }
 
+#[cfg(feature = "cli")]
 fn collect_all_files(paths: &[String]) -> Result<Vec<String>> {
     let mut files = vec![];
     for path in paths {
@@ -94,10 +96,11 @@ fn collect_all_files(paths: &[String]) -> Result<Vec<String>> {
     Ok(files)
 }
 
+#[cfg(feature = "cli")]
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = config::config::Config::load()?;
+    let config = bunkr_uploader::Config::load()?;
     let batch_size = cli.batch_size.or_else(|| config.default_batch_size).unwrap_or(1);
     let album_id = cli.album_id.or_else(|| config.default_album_id.clone());
     let album_name = cli.album_name.or_else(|| config.default_album_name.clone());
@@ -109,13 +112,13 @@ async fn main() -> Result<()> {
             println!("Token saved securely.");
         }
         Some(Commands::CreateAlbum { name, description, download, public }) => {
-            let token = core::utils::get_token(cli.token)?;
+            let token = bunkr_uploader::core::utils::get_token(cli.token)?;
             let uploader = BunkrUploader::new(token).await?;
             let id = uploader.create_album(name, description, download, public).await?;
             println!("Album created with ID: {}", id);
         }
         Some(Commands::Config { action }) => {
-            let mut config = config::config::Config::load()?;
+            let mut config = bunkr_uploader::Config::load()?;
             match action {
                 ConfigAction::Get { key } => {
                     if let Some(k) = key {
@@ -142,7 +145,7 @@ async fn main() -> Result<()> {
                 .filter_map(|f| std::fs::metadata(f).ok().map(|m| m.len()))
                 .sum();
 
-            let token = core::utils::get_token(cli.token)?;
+            let token = bunkr_uploader::core::utils::get_token(cli.token)?;
 
             let uploader = BunkrUploader::new(token).await?;
 
@@ -191,4 +194,10 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(not(feature = "cli"))]
+fn main() {
+    eprintln!("CLI feature not enabled. This binary requires the 'cli' feature.");
+    std::process::exit(1);
 }
