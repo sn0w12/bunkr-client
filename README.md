@@ -46,12 +46,19 @@ use bunkr_client::{BunkrUploader, Config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load()?;
+    let config = Config {
+        default_batch_size: Some(5),
+        default_album_id: None,
+        default_album_name: Some("My Album".to_string()),
+        preprocess_videos: Some(true),
+    };
+    // Or use default: let config = Config::default();
+
     let uploader = BunkrUploader::new("your_api_token".to_string()).await?;
 
     // Upload files
     let files = vec!["file1.jpg".to_string(), "file2.png".to_string()];
-    let (urls, failures) = uploader.upload_files(files, None, 1, None, &config).await?;
+    let (urls, failures) = uploader.upload_files(files, None, 1, None, Some(&config)).await?;
 
     Ok(())
 }
