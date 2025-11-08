@@ -27,14 +27,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bunkr_client = "0.1.0"
+bunkr-client = "0.1.0"
 ```
 
 To use without CLI features:
 
 ```toml
 [dependencies]
-bunkr_client = { version = "0.1.0", default-features = false }
+bunkr-client = { version = "0.1.0", default-features = false }
 ```
 
 ## Usage
