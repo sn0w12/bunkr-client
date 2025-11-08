@@ -6,7 +6,7 @@ description = "A Rust library and CLI tool for uploading files to Bunkr.cr"
 license = "MIT"
 repository = "https://github.com/sn0w12/bunkr-client"
 homepage = "https://github.com/sn0w12/bunkr-client"
-keywords = ["bunkr", "uploader", "cli", "file upload"]
+keywords = ["bunkr", "uploader", "cli", "file-upload"]
 categories = ["command-line-utilities"]
 
 [lib]
