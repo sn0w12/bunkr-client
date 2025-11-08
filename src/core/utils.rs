@@ -20,7 +20,7 @@ pub fn get_token(cli_token: Option<String>) -> Result<String> {
     if let Some(t) = cli_token {
         Ok(t)
     } else {
-        let entry = Entry::new("bunkr_uploader", "api_token")?;
+        let entry = Entry::new("bunkr_client", "api_token")?;
         entry.get_password().map_err(|_| anyhow::anyhow!("No token provided and none saved. Use --token or save one with save-token command."))
     }
 }

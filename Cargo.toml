@@ -1,10 +1,10 @@
 [package]
-name = "bunkr_uploader"
+name = "bunkr-client"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "bunkr_uploader"
+name = "bunkr_client"
 path = "src/lib.rs"
 
 [features]

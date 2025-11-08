@@ -27,14 +27,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bunkr_uploader = "0.1.0"
+bunkr_client = "0.1.0"
 ```
 
 To use without CLI features:
 
 ```toml
 [dependencies]
-bunkr_uploader = { version = "0.1.0", default-features = false }
+bunkr_client = { version = "0.1.0", default-features = false }
 ```
 
 ## Usage
@@ -42,7 +42,7 @@ bunkr_uploader = { version = "0.1.0", default-features = false }
 ### As a Library
 
 ```rust
-use bunkr_uploader::{BunkrUploader, Config};
+use bunkr_client::{BunkrUploader, Config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Save your API token securely:
 
 ```bash
-bunkr_uploader save-token YOUR_API_TOKEN
+bunkr-client save-token YOUR_API_TOKEN
 ```
 
 ### Upload Files
@@ -70,20 +70,20 @@ bunkr_uploader save-token YOUR_API_TOKEN
 Upload files to an existing album by name or id:
 
 ```bash
-bunkr_uploader --album-id ALBUM_ID file1.jpg file2.png
-bunkr_uploader --album-name "My Album" file1.jpg file2.png
+bunkr-client --album-id ALBUM_ID file1.jpg file2.png
+bunkr-client --album-name "My Album" file1.jpg file2.png
 ```
 
 Upload a directory:
 
 ```bash
-bunkr_uploader /path/to/directory
+bunkr-client /path/to/directory
 ```
 
 ### Create Album
 
 ```bash
-bunkr_uploader create-album "Album Name" --description "Description"
+bunkr-client create-album "Album Name" --description "Description"
 ```
 
 ### Configuration
@@ -91,13 +91,13 @@ bunkr_uploader create-album "Album Name" --description "Description"
 View current config:
 
 ```bash
-bunkr_uploader config get
+bunkr-client config get
 ```
 
 Set default batch size:
 
 ```bash
-bunkr_uploader config set default_batch_size 5
+bunkr-client config set default_batch_size 5
 ```
 
 ## Options

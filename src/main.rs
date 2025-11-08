@@ -1,13 +1,13 @@
 #[cfg(feature = "cli")]
 use clap::{Parser, Subcommand};
 #[cfg(feature = "cli")]
-use bunkr_uploader::BunkrUploader;
+use bunkr_client::BunkrUploader;
 #[cfg(feature = "cli")]
 #[cfg(feature = "ui")]
-use bunkr_uploader::ui::ui::{UIState, start_ui};
+use bunkr_client::ui::ui::{UIState, start_ui};
 #[cfg(feature = "cli")]
 #[cfg(not(feature = "ui"))]
-use bunkr_uploader::core::uploader::UIState;
+use bunkr_client::core::uploader::UIState;
 use anyhow::Result;
 use keyring::Entry;
 use std::{path::Path, sync::{Arc, Mutex}, io::Write, fs::OpenOptions};
@@ -18,7 +18,7 @@ use std::io;
 
 #[cfg(feature = "cli")]
 #[derive(Parser)]
-#[command(name = "bunkr_uploader", about = "CLI tool for uploading files to Bunkr.cr")]
+#[command(name = "bunkr_client", about = "CLI tool for uploading files to Bunkr.cr")]
 struct Cli {
     #[arg(short, long)]
     token: Option<String>,
@@ -100,25 +100,25 @@ fn collect_all_files(paths: &[String]) -> Result<Vec<String>> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = bunkr_uploader::Config::load()?;
+    let config = bunkr_client::Config::load()?;
     let batch_size = cli.batch_size.or_else(|| config.default_batch_size).unwrap_or(1);
     let album_id = cli.album_id.or_else(|| config.default_album_id.clone());
     let album_name = cli.album_name.or_else(|| config.default_album_name.clone());
 
     match cli.command {
         Some(Commands::SaveToken { token: save_token }) => {
-            let entry = Entry::new("bunkr_uploader", "api_token")?;
+            let entry = Entry::new("bunkr_client", "api_token")?;
             entry.set_password(&save_token)?;
             println!("Token saved securely.");
         }
         Some(Commands::CreateAlbum { name, description, download, public }) => {
-            let token = bunkr_uploader::core::utils::get_token(cli.token)?;
+            let token = bunkr_client::core::utils::get_token(cli.token)?;
             let uploader = BunkrUploader::new(token).await?;
             let id = uploader.create_album(name, description, download, public).await?;
             println!("Album created with ID: {}", id);
         }
         Some(Commands::Config { action }) => {
-            let mut config = bunkr_uploader::Config::load()?;
+            let mut config = bunkr_client::Config::load()?;
             match action {
                 ConfigAction::Get { key } => {
                     if let Some(k) = key {
@@ -145,7 +145,7 @@ async fn main() -> Result<()> {
                 .filter_map(|f| std::fs::metadata(f).ok().map(|m| m.len()))
                 .sum();
 
-            let token = bunkr_uploader::core::utils::get_token(cli.token)?;
+            let token = bunkr_client::core::utils::get_token(cli.token)?;
 
             let uploader = BunkrUploader::new(token).await?;
 
