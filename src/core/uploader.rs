@@ -381,15 +381,16 @@ impl BunkrUploader {
             }
         }
 
-        let url = if let Some(album_id) = album_id {
+        let url = {
             let finish_url = format!("{}/finishchunks", self.upload_url);
             let original = file_name.clone();
+            let albumid_value = album_id.map(|id| serde_json::Value::Number(id.parse::<i64>().unwrap_or(0).into())).unwrap_or(serde_json::Value::Null);
             let body = json!({
                 "files": [{
                     "uuid": uuid.to_string(),
                     "original": original,
                     "type": mime,
-                    "albumid": album_id.parse::<i64>().unwrap_or(0),
+                    "albumid": albumid_value,
                     "filelength": null,
                     "age": null,
                 }]
@@ -458,8 +459,6 @@ impl BunkrUploader {
                 }]));
             }
             res.files.and_then(|f| f.first().map(|x| x.url.clone()))
-        } else {
-            None
         };
 
         {
