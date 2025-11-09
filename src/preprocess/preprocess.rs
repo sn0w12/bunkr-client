@@ -61,8 +61,8 @@ fn split_video(path: &str, max_file_size: u64) -> Result<Vec<String>> {
     let stem = p.file_stem().unwrap().to_string_lossy();
     let extension = p.extension().unwrap_or_default().to_string_lossy();
 
-    // Create temp directory for split parts
-    let temp_dir = std::env::temp_dir().join(format!("bunkr_split_{}", Uuid::new_v4()));
+    let parent_dir = p.parent().unwrap_or(Path::new("."));
+    let temp_dir = parent_dir.join(format!("bunkr_split_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir)?;
 
     let hwaccel = detect_hwaccel();
@@ -84,8 +84,7 @@ fn split_video(path: &str, max_file_size: u64) -> Result<Vec<String>> {
     let size = metadata.len();
     let parts = (size as f64 / max_file_size as f64).ceil() as u32;
     let segment_time = duration / parts as f64;
-
-    let output_pattern = temp_dir.join(format!("{}_part_%03d.{}", stem, extension)).to_string_lossy().to_string();
+    let output_pattern = temp_dir.join(format!("{}_%03d.{}", stem, extension)).to_string_lossy().to_string();
 
     // Build ffmpeg args
     let mut args = vec![];
@@ -116,7 +115,7 @@ fn split_video(path: &str, max_file_size: u64) -> Result<Vec<String>> {
 
     let mut result = vec![];
     for i in 0..parts {
-        let part_path = temp_dir.join(format!("{}_part_{:03}.{}", stem, i, extension)).to_string_lossy().to_string();
+        let part_path = temp_dir.join(format!("{}_{:03}.{}", stem, i, extension)).to_string_lossy().to_string();
         // Check if file exists and size <= max_file_size
         if let Ok(meta) = std::fs::metadata(&part_path) {
             if meta.len() <= max_file_size {
