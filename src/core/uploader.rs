@@ -6,11 +6,14 @@ use crate::ui::ui::{UIState, UploadStatus};
 pub struct UIState;
 use anyhow::{Result, anyhow};
 use mime_guess::from_path;
-use reqwest::{Client, multipart};
+use reqwest::{Client, multipart, Body};
 use serde_json::json;
-use std::{path::Path, fs::File, io::Read, sync::{Arc, Mutex}};
+use std::{path::Path, sync::{Arc, Mutex}};
 use futures::stream::{self, StreamExt};
 use tokio::time::{sleep, Duration};
+use tokio::fs::File as TokioFile;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 pub struct BunkrUploader {
@@ -22,10 +25,10 @@ pub struct BunkrUploader {
 }
 
 impl BunkrUploader {
-    async fn retry_with_backoff<F, Fut>(mut f: F, max_retries: u32) -> Result<reqwest::Response, reqwest::Error>
+    async fn retry_with_backoff<F, Fut>(mut f: F, max_retries: u32) -> Result<reqwest::Response, anyhow::Error>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+        Fut: std::future::Future<Output = Result<reqwest::Response, anyhow::Error>>,
     {
         let mut delay = Duration::from_secs(1);
         for attempt in 0..=max_retries {
@@ -47,11 +50,12 @@ impl BunkrUploader {
     pub async fn new(token: String) -> Result<Self> {
         let client = Client::new();
 
-        let response = Self::retry_with_backoff(|| {
+        let response = Self::retry_with_backoff(|| async {
             client
                 .post("https://dash.bunkr.cr/api/tokens/verify")
                 .form(&[("token", token.clone())])
-                .send()
+                .send().await
+                .map_err(anyhow::Error::from)
         }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
@@ -70,11 +74,12 @@ impl BunkrUploader {
             return Err(anyhow!("Invalid API token"));
         }
 
-        let response = Self::retry_with_backoff(|| {
+        let response = Self::retry_with_backoff(|| async {
             client
                 .get("https://dash.bunkr.cr/api/check")
                 .header("token", &token)
-                .send()
+                .send().await
+                .map_err(anyhow::Error::from)
         }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
@@ -90,11 +95,12 @@ impl BunkrUploader {
             }
         };
 
-        let response = Self::retry_with_backoff(|| {
+        let response = Self::retry_with_backoff(|| async {
             client
                 .get("https://dash.bunkr.cr/api/node")
                 .header("token", &token)
-                .send()
+                .send().await
+                .map_err(anyhow::Error::from)
         }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
@@ -207,15 +213,11 @@ impl BunkrUploader {
         file_size: u64,
     ) -> Result<(Option<String>, Vec<FailedUploadInfo>)> {
         let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-        let mut file = File::open(path)?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
-        let size = buf.len() as u64;
 
         #[cfg(feature = "ui")]
         if let Some(ui_state) = &ui_state {
             let mut state = ui_state.lock().unwrap();
-            state.add_current(path.to_string_lossy().to_string(), 0.0, size);
+            state.add_current(path.to_string_lossy().to_string(), 0.0, file_size);
         }
 
         let headers = self.headers.clone();
@@ -227,15 +229,19 @@ impl BunkrUploader {
             headers
         };
 
-        let response = Self::retry_with_backoff(|| {
-            let part = multipart::Part::bytes(buf.clone()).file_name(file_name.clone()).mime_str(mime).unwrap();
+        let response = Self::retry_with_backoff(|| async {
+            let file = TokioFile::open(path).await.map_err(anyhow::Error::from)?;
+            let stream = ReaderStream::new(file);
+            let body = Body::wrap_stream(stream);
+            let part = multipart::Part::stream(body).file_name(file_name.clone()).mime_str(mime).unwrap();
             let form = multipart::Form::new().part("files[]", part);
             self
                 .client
                 .post(&self.upload_url)
                 .headers(headers.clone())
                 .multipart(form)
-                .send()
+                .send().await
+                .map_err(anyhow::Error::from)
         }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
@@ -302,7 +308,7 @@ impl BunkrUploader {
             if let Some(ui_state) = &ui_state {
                 let mut state = ui_state.lock().unwrap();
                 state.update_progress(&path.to_string_lossy(), 1.0);
-                state.add_uploaded_bytes(size);
+                state.add_uploaded_bytes(file_size);
                 state.remove_current(&path.to_string_lossy(), url.as_deref());
             }
         }
@@ -329,14 +335,16 @@ impl BunkrUploader {
         }
 
         let uuid = Uuid::new_v4();
-        let mut file = File::open(path)?;
+        let mut file = TokioFile::open(path).await?;
+        let mut buf = Vec::with_capacity(self.chunk_size as usize);
 
         for i in 0..total_chunks {
-            let mut buf = vec![0u8; self.chunk_size as usize];
-            let bytes_read = file.read(&mut buf)?;
+            buf.clear();
+            buf.resize(self.chunk_size as usize, 0);
+            let bytes_read = file.read(&mut buf).await?;
             buf.truncate(bytes_read);
 
-            let response = Self::retry_with_backoff(|| {
+            let response = Self::retry_with_backoff(|| async {
                 let part = multipart::Part::bytes(buf.clone())
                     .file_name(file_name.clone())
                     .mime_str("application/octet-stream").unwrap();
@@ -348,7 +356,8 @@ impl BunkrUploader {
                     .post(&self.upload_url)
                     .headers(self.headers.clone())
                     .multipart(form)
-                    .send()
+                    .send().await
+                    .map_err(anyhow::Error::from)
             }, 5).await?;
             let status = response.status();
             if !status.is_success() {
@@ -380,6 +389,7 @@ impl BunkrUploader {
                 }
             }
         }
+        drop(buf);
 
         let url = {
             let finish_url = format!("{}/finishchunks", self.upload_url);
@@ -395,12 +405,13 @@ impl BunkrUploader {
                     "age": null,
                 }]
             });
-            let response = Self::retry_with_backoff(|| {
+            let response = Self::retry_with_backoff(|| async {
                 self.client
                     .post(&finish_url)
                     .headers(self.headers.clone())
                     .json(&body)
-                    .send()
+                    .send().await
+                    .map_err(anyhow::Error::from)
             }, 5).await?;
             let status = response.status();
             let text = response.text().await?;
@@ -531,11 +542,12 @@ impl BunkrUploader {
         struct AlbumsResponse {
             albums: Vec<Album>,
         }
-        let response = Self::retry_with_backoff(|| {
+        let response = Self::retry_with_backoff(|| async {
             self.client
                 .get("https://dash.bunkr.cr/api/albums")
                 .headers(self.headers.clone())
-                .send()
+                .send().await
+                .map_err(anyhow::Error::from)
         }, 5).await?;
         let status = response.status();
         let text = response.text().await?;
@@ -571,12 +583,13 @@ impl BunkrUploader {
             "public": public,
         });
 
-        let response = Self::retry_with_backoff(|| {
+        let response = Self::retry_with_backoff(|| async {
             self.client
                 .post("https://dash.bunkr.cr/api/albums")
                 .headers(self.headers.clone())
                 .json(&body)
-                .send()
+                .send().await
+                .map_err(anyhow::Error::from)
         }, 5).await?;
 
         let status = response.status();
