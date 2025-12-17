@@ -4,11 +4,11 @@ use keyring::Entry;
 pub fn parse_size(size_str: &str) -> Result<u64> {
     let s = size_str.trim().to_uppercase();
     if s.ends_with("GB") {
-        Ok(s.trim_end_matches("GB").parse::<u64>()? * 1024 * 1024 * 1024)
+        Ok(s.trim_end_matches("GB").parse::<u64>()? * 1000 * 1000 * 1000)
     } else if s.ends_with("MB") {
-        Ok(s.trim_end_matches("MB").parse::<u64>()? * 1024 * 1024)
+        Ok(s.trim_end_matches("MB").parse::<u64>()? * 1000 * 1000)
     } else if s.ends_with("KB") {
-        Ok(s.trim_end_matches("KB").parse::<u64>()? * 1024)
+        Ok(s.trim_end_matches("KB").parse::<u64>()? * 1000)
     } else if s.ends_with("B") {
         Ok(s.trim_end_matches("B").parse::<u64>()?)
     } else {

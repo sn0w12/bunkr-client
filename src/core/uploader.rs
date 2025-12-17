@@ -340,10 +340,21 @@ impl BunkrUploader {
 
         for i in 0..total_chunks {
             buf.clear();
-            buf.resize(self.chunk_size as usize, 0);
-            let bytes_read = file.read(&mut buf).await?;
+            let mut total_read = 0;
+            let chunk_size_usize = self.chunk_size as usize;
+            while total_read < chunk_size_usize {
+                let remaining = chunk_size_usize - total_read;
+                buf.resize(total_read + remaining, 0);
+                let n = file.read(&mut buf[total_read..]).await?;
+                if n == 0 {
+                    break;
+                }
+                total_read += n;
+            }
+            let bytes_read = total_read;
             buf.truncate(bytes_read);
 
+            let chunk_offset = i * self.chunk_size;
             let response = Self::retry_with_backoff(|| async {
                 let part = multipart::Part::bytes(buf.clone())
                     .file_name(file_name.clone())
@@ -351,6 +362,10 @@ impl BunkrUploader {
                 let form = multipart::Form::new()
                     .text("dzuuid", uuid.to_string())
                     .text("dzchunkindex", i.to_string())
+                    .text("dztotalfilesize", total_size.to_string())
+                    .text("dzchunksize", self.chunk_size.to_string())
+                    .text("dztotalchunkcount", total_chunks.to_string())
+                    .text("dzchunkbyteoffset", chunk_offset.to_string())
                     .part("files[]", part);
                 self.client
                     .post(&self.upload_url)
