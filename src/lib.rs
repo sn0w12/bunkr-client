@@ -7,5 +7,6 @@ pub mod ui;
 
 // Re-export main types for easier use
 pub use core::uploader::BunkrUploader;
+pub use core::downloader::BunkrDownloader;
 pub use core::types::*;
 pub use config::config::Config;

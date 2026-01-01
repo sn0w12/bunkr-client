@@ -7,29 +7,29 @@ use ratatui::{
     Terminal,
 };
 use crossterm::{
-    execute,
+    execute, cursor, terminal, ExecutableCommand,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 };
 use std::io;
-use crate::core::types::FailedUploadInfo;
+use crate::core::types::FailedOperationInfo;
 use webbrowser;
 
 #[derive(Clone)]
-pub enum UploadStatus {
+pub enum OperationStatus {
     Preprocessing,
     Ongoing(f64),
     Completed,
-    Failed(FailedUploadInfo),
+    Failed(FailedOperationInfo),
 }
 
 pub struct UIState {
     pub total_files: usize,
-    pub uploaded_files: usize,
-    pub uploaded_bytes: u64,
+    pub processed_files: usize,
+    pub processed_bytes: u64,
     pub total_bytes: u64,
     pub start_time: Instant,
-    pub all_uploads: HashMap<String, UploadStatus>,
+    pub all_operations: HashMap<String, OperationStatus>,
     pub album_id: Option<String>,
     pub file_sizes: HashMap<String, u64>,
     pub completed_urls: HashMap<String, String>,
@@ -39,51 +39,51 @@ impl UIState {
     pub fn new(total_files: usize, album_id: Option<String>, total_bytes: u64) -> Self {
         Self {
             total_files,
-            uploaded_files: 0,
-            uploaded_bytes: 0,
+            processed_files: 0,
+            processed_bytes: 0,
             total_bytes,
             start_time: Instant::now(),
-            all_uploads: HashMap::new(),
+            all_operations: HashMap::new(),
             album_id,
             file_sizes: HashMap::new(),
             completed_urls: HashMap::new(),
         }
     }
 
-    pub fn add_current(&mut self, name: String, progress: f64, size: u64) {
-        self.all_uploads.insert(name.clone(), UploadStatus::Ongoing(progress));
+    pub fn add_current_operation(&mut self, name: String, progress: f64, size: u64) {
+        self.all_operations.insert(name.clone(), OperationStatus::Ongoing(progress));
         self.file_sizes.insert(name, size);
     }
 
     pub fn update_progress(&mut self, name: &str, progress: f64) {
-        if let Some(UploadStatus::Ongoing(ref mut p)) = self.all_uploads.get_mut(name) {
+        if let Some(OperationStatus::Ongoing(ref mut p)) = self.all_operations.get_mut(name) {
             *p = progress;
         }
     }
 
-    pub fn remove_current(&mut self, name: &str, url: Option<&str>) {
-        self.all_uploads.insert(name.to_string(), UploadStatus::Completed);
-        self.uploaded_files += 1;
+    pub fn remove_current_operation(&mut self, name: &str, url: Option<&str>) {
+        self.all_operations.insert(name.to_string(), OperationStatus::Completed);
+        self.processed_files += 1;
         if let Some(url) = url {
             self.completed_urls.insert(name.to_string(), url.to_string());
         }
     }
 
-    pub fn add_uploaded_bytes(&mut self, bytes: u64) {
-        self.uploaded_bytes += bytes;
+    pub fn add_processed_bytes(&mut self, bytes: u64) {
+        self.processed_bytes += bytes;
     }
 
-    pub fn add_failed(&mut self, name: String, info: FailedUploadInfo) {
-        self.all_uploads.insert(name, UploadStatus::Failed(info));
+    pub fn add_failed_operation(&mut self, name: String, info: FailedOperationInfo) {
+        self.all_operations.insert(name, OperationStatus::Failed(info));
     }
 
     pub fn add_preprocessing(&mut self, name: String, size: u64) {
         self.file_sizes.insert(name.clone(), size);
-        self.all_uploads.insert(name, UploadStatus::Preprocessing);
+        self.all_operations.insert(name, OperationStatus::Preprocessing);
     }
 
-    pub fn remove_upload(&mut self, name: &str) {
-        self.all_uploads.remove(name);
+    pub fn remove_operation(&mut self, name: &str) {
+        self.all_operations.remove(name);
         self.file_sizes.remove(name);
     }
 
@@ -123,9 +123,9 @@ impl UI {
     pub fn draw(&mut self, state: &UIState) -> Result<(), Box<dyn std::error::Error>> {
         self.terminal.draw(|f| {
             let size = f.area();
-            let speed = if state.start_time.elapsed().as_secs_f64() > 0.0 { state.uploaded_bytes as f64 / state.start_time.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 };
+            let speed = if state.start_time.elapsed().as_secs_f64() > 0.0 { state.processed_bytes as f64 / state.start_time.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 };
 
-            let remaining_bytes: u64 = state.total_bytes.saturating_sub(state.uploaded_bytes);
+            let remaining_bytes: u64 = state.total_bytes.saturating_sub(state.processed_bytes);
 
             let eta_str = if remaining_bytes > 0 && speed > 0.0 {
                 let time_left_seconds = remaining_bytes as f64 / (speed * 1_000_000.0);
@@ -141,9 +141,9 @@ impl UI {
             };
 
             let header_text = if let Some(album) = &state.album_id {
-                format!("Bunkr Uploader | Album: {} | Uploaded: {}/{} | Speed: {:.2} MB/s{}", album, state.uploaded_files, state.total_files, speed, eta_str)
+                format!("Bunkr Uploader | Album: {} | Processed: {}/{} | Speed: {:.2} MB/s{}", album, state.processed_files, state.total_files, speed, eta_str)
             } else {
-                format!("Bunkr Uploader | Uploaded: {}/{} | Speed: {:.2} MB/s{}", state.uploaded_files, state.total_files, speed, eta_str)
+                format!("Bunkr Uploader | Processed: {}/{} | Speed: {:.2} MB/s{}", state.processed_files, state.total_files, speed, eta_str)
             };
             let header = Paragraph::new(header_text)
                 .block(Block::default().borders(Borders::ALL).title("Header"))
@@ -159,7 +159,7 @@ impl UI {
 
             let list_area = chunks[1];
 
-            let mut all_items_vec: Vec<(&String, &UploadStatus)> = state.all_uploads.iter().collect();
+            let mut all_items_vec: Vec<(&String, &OperationStatus)> = state.all_operations.iter().collect();
             all_items_vec.sort_by(|a, b| a.0.cmp(b.0));
 
             let current_row_count = all_items_vec.len();
@@ -167,18 +167,18 @@ impl UI {
             let rows: Vec<Row> = all_items_vec.iter().map(|(name, status)| {
                 let file_name = std::path::Path::new(name).file_name().unwrap_or(std::ffi::OsStr::new(name)).to_string_lossy();
                 let size = match status {
-                    UploadStatus::Failed(info) => info.file_size,
+                    OperationStatus::Failed(info) => info.file_size,
                     _ => *state.file_sizes.get(*name).unwrap_or(&0),
                 };
                 let size_str = format_size(size);
                 let (progress_str, status_str, url_str) = match status {
-                    UploadStatus::Preprocessing => ("".to_string(), "Preprocessing".to_string(), "".to_string()),
-                    UploadStatus::Ongoing(progress) => (format!("{:.0}%", progress * 100.0), "Ongoing".to_string(), "".to_string()),
-                    UploadStatus::Completed => {
+                    OperationStatus::Preprocessing => ("".to_string(), "Preprocessing".to_string(), "".to_string()),
+                    OperationStatus::Ongoing(progress) => (format!("{:.0}%", progress * 100.0), "Ongoing".to_string(), "".to_string()),
+                    OperationStatus::Completed => {
                         let url = state.completed_urls.get(*name).cloned().unwrap_or_else(|| "".to_string());
                         ("100%".to_string(), "Completed".to_string(), url)
                     }
-                    UploadStatus::Failed(info) => {
+                    OperationStatus::Failed(info) => {
                         let status_str_inner = if let Some(code) = info.status_code {
                             format!(" (HTTP {})", code)
                         } else {
@@ -199,7 +199,7 @@ impl UI {
             ];
 
             let table = Table::new(rows, widths)
-                .block(Block::default().borders(Borders::ALL).title("Uploads"))
+                .block(Block::default().borders(Borders::ALL).title("Operations"))
                 .header(
                     Row::new(vec!["File", "Size", "Progress", "Status", "URL"])
                         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
@@ -254,12 +254,12 @@ pub fn start_ui(ui_state: Arc<Mutex<UIState>>) -> (std::thread::JoinHandle<()>, 
                             }
                             KeyCode::Enter => {
                                 let state = ui_state_clone.lock().unwrap();
-                                let mut all_items_vec: Vec<(&String, &UploadStatus)> = state.all_uploads.iter().collect();
+                                let mut all_items_vec: Vec<(&String, &OperationStatus)> = state.all_operations.iter().collect();
                                 all_items_vec.sort_by(|a, b| a.0.cmp(b.0));
                                 if let Some(selected) = ui.table_state.selected() {
                                     if selected < all_items_vec.len() {
                                         let (name, status) = &all_items_vec[selected];
-                                        if let UploadStatus::Completed = status {
+                                        if let OperationStatus::Completed = status {
                                             if let Some(url) = state.completed_urls.get(*name) {
                                                 let _ = webbrowser::open(url);
                                             }
@@ -281,4 +281,15 @@ pub fn start_ui(ui_state: Arc<Mutex<UIState>>) -> (std::thread::JoinHandle<()>, 
         ui.restore().unwrap();
     });
     (handle, running)
+}
+
+pub fn stop_ui(handle: std::thread::JoinHandle<()>, running: Arc<AtomicBool>) {
+    // Stop the UI
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    handle.join().unwrap();
+
+    // Clear the UI and print final results
+    let mut stdout = io::stdout();
+    stdout.execute(terminal::Clear(terminal::ClearType::All)).unwrap();
+    stdout.execute(cursor::MoveTo(0, 0)).unwrap();
 }
