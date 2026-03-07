@@ -3,6 +3,7 @@ use anyhow::{Result, anyhow};
 use regex::Regex;
 use reqwest::{Client, header};
 use serde_json;
+use json5;
 use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
 use base64::{Engine as _, engine::general_purpose};
@@ -106,8 +107,8 @@ impl BunkrDownloader {
         // Convert JavaScript object notation to JSON
         let json_str = self.js_to_json(js_array)?;
 
-        // Parse the JSON array
-        let files: Vec<AlbumFile> = serde_json::from_str(&json_str)?;
+        // Parse the JS-like array using json5 (supports single quotes, trailing commas, etc.)
+        let files: Vec<AlbumFile> = json5::from_str(&json_str)?;
 
         Ok(files)
     }
