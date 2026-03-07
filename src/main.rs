@@ -90,7 +90,8 @@ enum Commands {
     },
     /// Download files from an album
     Download {
-        album_url: String,
+        /// One or more album/file URLs to download
+        album_urls: Vec<String>,
         #[arg(short, long)]
         output_dir: Option<String>,
     },
@@ -158,9 +159,13 @@ async fn main() -> Result<()> {
             let id = uploader.create_album(name, description, download, public).await?;
             println!("Album created with ID: {}", id);
         }
-        Some(Commands::Download { album_url, output_dir }) => {
+        Some(Commands::Download { album_urls, output_dir }) => {
             let downloader = bunkr_client::BunkrDownloader::new().await?;
-            let files = downloader.get_files(&album_url).await?;
+            let mut files: Vec<_> = Vec::new();
+            for url in &album_urls {
+                let mut fetched = downloader.get_files(url).await?;
+                files.append(&mut fetched);
+            }
 
             let output_dir = output_dir.unwrap_or_else(|| ".".to_string());
             std::fs::create_dir_all(&output_dir)?;

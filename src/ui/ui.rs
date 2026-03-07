@@ -123,12 +123,14 @@ impl UI {
     pub fn draw(&mut self, state: &UIState) -> Result<(), Box<dyn std::error::Error>> {
         self.terminal.draw(|f| {
             let size = f.area();
-            let speed = if state.start_time.elapsed().as_secs_f64() > 0.0 { state.processed_bytes as f64 / state.start_time.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 };
+            let elapsed = state.start_time.elapsed().as_secs_f64();
+            let bytes_per_sec = if elapsed > 0.0 { state.processed_bytes as f64 / elapsed } else { 0.0 };
+            let speed_mb_s = bytes_per_sec / 1_000_000.0;
 
             let remaining_bytes: u64 = state.total_bytes.saturating_sub(state.processed_bytes);
 
-            let eta_str = if remaining_bytes > 0 && speed > 0.0 {
-                let time_left_seconds = remaining_bytes as f64 / (speed * 1_000_000.0);
+            let eta_str = if remaining_bytes > 0 && bytes_per_sec > 0.0 {
+                let time_left_seconds = remaining_bytes as f64 / bytes_per_sec;
                 if time_left_seconds < 60.0 {
                     format!(" | ETA: {:.0}s", time_left_seconds)
                 } else if time_left_seconds < 3600.0 {
@@ -141,9 +143,9 @@ impl UI {
             };
 
             let header_text = if let Some(album) = &state.album_id {
-                format!("Bunkr Uploader | Album: {} | Processed: {}/{} | Speed: {:.2} MB/s{}", album, state.processed_files, state.total_files, speed, eta_str)
+                format!("Bunkr Client | Album: {} | Processed: {}/{} | Speed: {:.2} MB/s{}", album, state.processed_files, state.total_files, speed_mb_s, eta_str)
             } else {
-                format!("Bunkr Uploader | Processed: {}/{} | Speed: {:.2} MB/s{}", state.processed_files, state.total_files, speed, eta_str)
+                format!("Bunkr Client | Processed: {}/{} | Speed: {:.2} MB/s{}", state.processed_files, state.total_files, speed_mb_s, eta_str)
             };
             let header = Paragraph::new(header_text)
                 .block(Block::default().borders(Borders::ALL).title("Header"))
