@@ -64,7 +64,7 @@ struct Cli {
     #[arg(short = 'n', long)]
     album_name: Option<String>,
 
-    #[arg(short = 'b', long)]
+    #[arg(short = 'b', long, global = true)]
     batch_size: Option<usize>,
 
     paths: Vec<String>,
@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
             let (ui_handle, running) = start_ui(ui_state.as_ref().unwrap().clone());
 
             let ui_state_for_download = ui_state.as_ref().map(|arc| Arc::clone(arc));
-            downloader.download_files(files, &output_dir, ui_state_for_download).await?;
+            downloader.download_files(files, &output_dir, batch_size, ui_state_for_download).await?;
 
             // Print failed operations
             #[cfg(feature = "ui")]

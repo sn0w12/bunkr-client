@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
 use base64::{Engine as _, engine::general_purpose};
 use std::path::Path;
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use tokio::io::AsyncWriteExt;
 use tokio::fs::File;
 
@@ -22,6 +22,7 @@ impl UIState {
     pub fn update_progress(&mut self, _name: &str, _progress: f64) {}
     pub fn remove_current_operation(&mut self, _name: &str, _url: Option<&str>) {}
     pub fn add_failed_operation(&mut self, _name: String, _info: FailedOperationInfo) {}
+    pub fn add_processed_bytes(&mut self, _bytes: u64) {}
 }
 
 pub struct BunkrDownloader {
@@ -217,20 +218,35 @@ impl BunkrDownloader {
                 let mut state = state.lock().unwrap();
                 let progress = if total_size > 0 { (downloaded as f64 / total_size as f64).min(1.0) } else { 0.0 };
                 state.update_progress(&file.original, progress);
+                state.add_processed_bytes(chunk.len() as u64);
             }
         }
 
         Ok(())
     }
 
-    pub async fn download_files(&self, files: Vec<AlbumFile>, output_dir: &str, ui_state: Option<Arc<Mutex<UIState>>>) -> Result<()> {
-        for file in files {
-            if let Some(ref state) = ui_state {
-                let mut state = state.lock().unwrap();
-                state.add_current_operation(file.original.clone(), 0.0, file.size as u64);
-            }
+    pub async fn download_files(&self, files: Vec<AlbumFile>, output_dir: &str, batch_size: usize, ui_state: Option<Arc<Mutex<UIState>>>) -> Result<()> {
+        let batch_size = batch_size.max(1);
+        let output_dir = output_dir.to_string();
 
-            match self.download_file(&file, output_dir, ui_state.clone()).await {
+        let mut work_stream = stream::iter(files.into_iter().map(|file| {
+            let ui_state = ui_state.clone();
+            let output_dir = output_dir.clone();
+
+            async move {
+                if let Some(ref state) = ui_state {
+                    let mut state = state.lock().unwrap();
+                    state.add_current_operation(file.original.clone(), 0.0, file.size as u64);
+                }
+
+                let result = self.download_file(&file, &output_dir, ui_state.clone()).await;
+                (file, result)
+            }
+        }))
+        .buffer_unordered(batch_size);
+
+        while let Some((file, result)) = work_stream.next().await {
+            match result {
                 Ok(_) => {
                     if let Some(ref state) = ui_state {
                         let mut state = state.lock().unwrap();
@@ -244,13 +260,14 @@ impl BunkrDownloader {
                             path: file.original.clone(),
                             error: e.to_string(),
                             file_size: file.size as u64,
-                            status_code: None, // Could be improved to get actual status
+                            status_code: None,
                         };
                         state.add_failed_operation(file.original.clone(), info);
                     }
                 }
             }
         }
+
         Ok(())
     }
 
