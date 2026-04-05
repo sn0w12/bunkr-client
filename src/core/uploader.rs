@@ -8,10 +8,10 @@ use mime_guess::from_path;
 use reqwest::{Client, multipart, Body};
 use serde_json::json;
 use std::{path::Path, sync::{Arc, Mutex}};
-use futures::stream::{self, StreamExt};
 use tokio::time::{sleep, Duration};
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncReadExt;
+use tokio::task::JoinSet;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -507,6 +507,7 @@ impl BunkrUploader {
     ) -> Result<(Vec<String>, Vec<FailedOperationInfo>)> {
         let mut results = vec![];
         let mut failures = vec![];
+        let batch_size = batch_size.max(1);
 
         // Clone the necessary data to move into the async tasks
         let client = self.client.clone();
@@ -517,7 +518,14 @@ impl BunkrUploader {
         let album_id_owned = album_id.map(|s| s.to_string());
         let config_owned = config.cloned().unwrap_or_else(|| Config::default());
 
-        let stream = stream::iter(files.into_iter().map(|f| {
+        let mut files_iter = files.into_iter();
+        let mut join_set = JoinSet::new();
+
+        let mut spawn_next = |join_set: &mut JoinSet<Result<(Option<String>, Vec<FailedOperationInfo>)>>| {
+            let Some(file_path) = files_iter.next() else {
+                return;
+            };
+
             let client = client.clone();
             let headers = headers.clone();
             let upload_url = upload_url.clone();
@@ -525,7 +533,7 @@ impl BunkrUploader {
             let ui_state = ui_state.clone();
             let config_owned = config_owned.clone();
 
-            async move {
+            join_set.spawn(async move {
                 let uploader = BunkrUploader {
                     client,
                     headers,
@@ -533,19 +541,23 @@ impl BunkrUploader {
                     max_file_size,
                     chunk_size,
                 };
-                uploader.upload_file(&f, album_id_owned.as_deref(), ui_state, &config_owned).await
-            }
-        })).buffer_unordered(batch_size);
+                uploader.upload_file(&file_path, album_id_owned.as_deref(), ui_state, &config_owned).await
+            });
+        };
 
-        let upload_results: Vec<Result<(Option<String>, Vec<FailedOperationInfo>)>> = stream.collect().await;
+        for _ in 0..batch_size {
+            spawn_next(&mut join_set);
+        }
 
-        for r in upload_results {
-            if let Ok((url, fails)) = r {
+        while let Some(result) = join_set.join_next().await {
+            if let Ok(Ok((url, fails))) = result {
                 if let Some(u) = url {
                     results.push(u);
                 }
                 failures.extend(fails);
             }
+
+            spawn_next(&mut join_set);
         }
 
         Ok((results, failures))

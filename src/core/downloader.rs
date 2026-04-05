@@ -1,16 +1,18 @@
 use crate::core::types::{AlbumFile, DownloadResponse, FailedOperationInfo};
 use anyhow::{Result, anyhow};
+#[cfg(feature = "download")]
 use regex::Regex;
 use reqwest::{Client, header};
 use serde_json;
+#[cfg(feature = "download")]
 use json5;
 use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
 use base64::{Engine as _, engine::general_purpose};
 use std::path::Path;
-use futures::{StreamExt, stream};
 use tokio::io::AsyncWriteExt;
 use tokio::fs::File;
+use tokio::task::JoinSet;
 
 #[cfg(feature = "ui")]
 use crate::ui::ui::UIState;
@@ -29,13 +31,38 @@ impl UIState {
 pub struct BunkrDownloader {
     client: Client,
     headers: header::HeaderMap,
+    #[cfg(feature = "download")]
     album_files_regex: OnceLock<Regex>,
+    #[cfg(feature = "download")]
     trailing_comma_regex: OnceLock<Regex>,
+    #[cfg(feature = "download")]
     keys_regex: OnceLock<Regex>,
+    #[cfg(feature = "download")]
     id_regex: OnceLock<Regex>,
+    #[cfg(feature = "download")]
     orig_regex: OnceLock<Regex>,
 }
 
+#[cfg(not(feature = "download"))]
+impl BunkrDownloader {
+    pub async fn new() -> Result<Self> {
+        Err(anyhow!("Download feature is not enabled."))
+    }
+
+    pub async fn get_files(&self, _album_url: &str) -> Result<Vec<AlbumFile>> {
+        Err(anyhow!("Download feature is not enabled."))
+    }
+
+    pub async fn download_file(&self, _file: &AlbumFile, _output_dir: &str, _ui_state: Option<Arc<Mutex<UIState>>>) -> Result<()> {
+        Err(anyhow!("Download feature is not enabled."))
+    }
+
+    pub async fn download_files(&self, _files: Vec<AlbumFile>, _output_dir: &str, _batch_size: usize, _ui_state: Option<Arc<Mutex<UIState>>>) -> Result<()> {
+        Err(anyhow!("Download feature is not enabled."))
+    }
+}
+
+#[cfg(feature = "download")]
 impl BunkrDownloader {
     pub async fn new() -> Result<Self> {
         let client = Client::new();
@@ -167,11 +194,42 @@ impl BunkrDownloader {
     }
 
     pub async fn download_file(&self, file: &AlbumFile, output_dir: &str, ui_state: Option<Arc<Mutex<UIState>>>) -> Result<()> {
+        Self::download_file_owned(
+            self.client.clone(),
+            self.headers.clone(),
+            Self::owned_album_file(file),
+            output_dir.to_string(),
+            ui_state,
+        ).await
+    }
+
+    fn owned_album_file(file: &AlbumFile) -> AlbumFile {
+        AlbumFile {
+            id: file.id,
+            name: file.name.clone(),
+            original: file.original.clone(),
+            slug: file.slug.clone(),
+            file_type: file.file_type.clone(),
+            extension: file.extension.clone(),
+            size: file.size,
+            timestamp: file.timestamp.clone(),
+            thumbnail: file.thumbnail.clone(),
+            cdn_endpoint: file.cdn_endpoint.clone(),
+        }
+    }
+
+    async fn download_file_owned(
+        client: Client,
+        headers: header::HeaderMap,
+        file: AlbumFile,
+        output_dir: String,
+        ui_state: Option<Arc<Mutex<UIState>>>,
+    ) -> Result<()> {
         // Post to the API to get the download URL
         let api_url = "https://apidl.bunkr.ru/api/_001_v2";
         let body = serde_json::json!({ "id": file.id.to_string() });
 
-        let response = self.client.post(api_url).headers(self.headers.clone()).json(&body).send().await?;
+        let response = client.post(api_url).headers(headers).json(&body).send().await?;
         let response_text = response.text().await?;
 
         if !response_text.trim().starts_with('{') {
@@ -185,7 +243,7 @@ impl BunkrDownloader {
         }
 
         // Decode the URL
-        let decoded_url = self.decrypt_url(&download_resp.url, download_resp.timestamp)?;
+        let decoded_url = BunkrDownloader::decrypt_url(&download_resp.url, download_resp.timestamp)?;
 
         // Append the name parameter as per JS
         let separator = if decoded_url.contains('?') { '&' } else { '?' };
@@ -199,19 +257,18 @@ impl BunkrDownloader {
         download_headers.insert("Accept-Language", "en-US,en;q=0.5".parse()?);
         download_headers.insert("Referer", "https://get.bunkrr.su/".parse()?);
 
-        let response = self.client.get(&full_url).headers(download_headers).send().await?;
+        let response = client.get(&full_url).headers(download_headers).send().await?;
         if !response.status().is_success() {
             return Err(anyhow!("Failed to download file: {}", response.status()));
         }
 
         let total_size = response.content_length().unwrap_or(file.size as u64);
         let mut downloaded = 0u64;
-        let file_path = Path::new(output_dir).join(&file.original);
+        let file_path = Path::new(&output_dir).join(&file.original);
         let mut file_handle = File::create(&file_path).await?;
 
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await? {
             file_handle.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
 
@@ -229,50 +286,69 @@ impl BunkrDownloader {
     pub async fn download_files(&self, files: Vec<AlbumFile>, output_dir: &str, batch_size: usize, ui_state: Option<Arc<Mutex<UIState>>>) -> Result<()> {
         let batch_size = batch_size.max(1);
         let output_dir = output_dir.to_string();
+        let client = self.client.clone();
+        let headers = self.headers.clone();
 
-        let mut work_stream = stream::iter(files.into_iter().map(|file| {
-            let ui_state = ui_state.clone();
+        let mut files_iter = files.into_iter();
+        let mut join_set = JoinSet::new();
+
+        let mut spawn_next = |join_set: &mut JoinSet<(AlbumFile, Result<()>)>| {
+            let Some(file) = files_iter.next() else {
+                return;
+            };
+
+            let client = client.clone();
+            let headers = headers.clone();
             let output_dir = output_dir.clone();
+            let ui_state = ui_state.clone();
 
-            async move {
+            join_set.spawn(async move {
                 if let Some(ref state) = ui_state {
                     let mut state = state.lock().unwrap();
                     state.add_current_operation(file.original.clone(), 0.0, file.size as u64);
                 }
 
-                let result = self.download_file(&file, &output_dir, ui_state.clone()).await;
-                (file, result)
-            }
-        }))
-        .buffer_unordered(batch_size);
+                let file_for_result = BunkrDownloader::owned_album_file(&file);
+                let result = BunkrDownloader::download_file_owned(client, headers, file, output_dir, ui_state.clone()).await;
+                (file_for_result, result)
+            });
+        };
 
-        while let Some((file, result)) = work_stream.next().await {
-            match result {
-                Ok(_) => {
-                    if let Some(ref state) = ui_state {
-                        let mut state = state.lock().unwrap();
-                        state.remove_current_operation(&file.original, None);
+        for _ in 0..batch_size {
+            spawn_next(&mut join_set);
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            if let Ok((file, result)) = result {
+                match result {
+                    Ok(_) => {
+                        if let Some(ref state) = ui_state {
+                            let mut state = state.lock().unwrap();
+                            state.remove_current_operation(&file.original, None);
+                        }
                     }
-                }
-                Err(e) => {
-                    if let Some(ref state) = ui_state {
-                        let mut state = state.lock().unwrap();
-                        let info = FailedOperationInfo {
-                            path: file.original.clone(),
-                            error: e.to_string(),
-                            file_size: file.size as u64,
-                            status_code: None,
-                        };
-                        state.add_failed_operation(file.original.clone(), info);
+                    Err(e) => {
+                        if let Some(ref state) = ui_state {
+                            let mut state = state.lock().unwrap();
+                            let info = FailedOperationInfo {
+                                path: file.original.clone(),
+                                error: e.to_string(),
+                                file_size: file.size as u64,
+                                status_code: None,
+                            };
+                            state.add_failed_operation(file.original.clone(), info);
+                        }
                     }
                 }
             }
+
+            spawn_next(&mut join_set);
         }
 
         Ok(())
     }
 
-    fn decrypt_url(&self, encrypted_base64: &str, timestamp: i64) -> Result<String> {
+    fn decrypt_url(encrypted_base64: &str, timestamp: i64) -> Result<String> {
         // Calculate the key as per the JavaScript
         let divisor = 3600.0;
         let suffix = ((timestamp as f64) / divisor).floor() as i64;

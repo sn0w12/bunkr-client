@@ -97,6 +97,7 @@ impl ConfigKey {
 }
 
 impl Config {
+    #[cfg(feature = "cli")]
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path();
         if config_path.exists() {
@@ -107,6 +108,12 @@ impl Config {
         }
     }
 
+    #[cfg(not(feature = "cli"))]
+    pub fn load() -> Result<Self> {
+        Ok(Self::default())
+    }
+
+    #[cfg(feature = "cli")]
     pub fn save(&self) -> Result<()> {
         let config_path = Self::config_path();
         if let Some(parent) = config_path.parent() {
@@ -115,6 +122,11 @@ impl Config {
         let content = toml::to_string(self)?;
         fs::write(config_path, content)?;
         Ok(())
+    }
+
+    #[cfg(not(feature = "cli"))]
+    pub fn save(&self) -> Result<()> {
+        Err(anyhow::anyhow!("CLI feature is not enabled."))
     }
 
     pub fn get_value(&self, key: &str) -> String {
@@ -143,9 +155,15 @@ impl Config {
         }
     }
 
+    #[cfg(feature = "cli")]
     fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("bunkr_client.toml")
+    }
+
+    #[cfg(not(feature = "cli"))]
+    fn config_path() -> PathBuf {
+        PathBuf::from(".bunkr_client.toml")
     }
 }

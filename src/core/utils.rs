@@ -1,4 +1,5 @@
 use anyhow::Result;
+#[cfg(feature = "cli")]
 use keyring::Entry;
 
 pub fn parse_size(size_str: &str) -> Result<u64> {
@@ -16,6 +17,7 @@ pub fn parse_size(size_str: &str) -> Result<u64> {
     }
 }
 
+#[cfg(feature = "cli")]
 pub fn get_token(cli_token: Option<String>) -> Result<String> {
     if let Some(t) = cli_token {
         Ok(t)
@@ -23,4 +25,9 @@ pub fn get_token(cli_token: Option<String>) -> Result<String> {
         let entry = Entry::new("bunkr_client", "api_token")?;
         entry.get_password().map_err(|_| anyhow::anyhow!("No token provided and none saved. Use --token or save one with save-token command."))
     }
+}
+
+#[cfg(not(feature = "cli"))]
+pub fn get_token(_cli_token: Option<String>) -> Result<String> {
+    Err(anyhow::anyhow!("CLI feature is not enabled."))
 }

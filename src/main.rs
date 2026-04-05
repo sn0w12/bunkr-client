@@ -10,10 +10,11 @@ use bunkr_client::ui::ui::OperationStatus;
 #[cfg(not(feature = "ui"))]
 use bunkr_client::core::types::UIState;
 use anyhow::Result;
+#[cfg(feature = "cli")]
 use keyring::Entry;
 use std::{path::Path, sync::{Arc, Mutex}, io::Write, fs::OpenOptions};
 
-
+#[cfg(feature = "cli")]
 pub fn get_styles() -> clap::builder::Styles {
     clap::builder::Styles::styled()
         .usage(
@@ -49,7 +50,6 @@ pub fn get_styles() -> clap::builder::Styles {
             anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::White))),
         )
 }
-
 
 #[cfg(feature = "cli")]
 #[derive(Parser)]
