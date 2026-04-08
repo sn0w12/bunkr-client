@@ -9,9 +9,11 @@ use bunkr_client::ui::ui::OperationStatus;
 #[cfg(feature = "cli")]
 #[cfg(not(feature = "ui"))]
 use bunkr_client::core::types::UIState;
+#[cfg(feature = "cli")]
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use keyring::Entry;
+#[cfg(feature = "cli")]
 use std::{path::Path, sync::{Arc, Mutex}, io::Write, fs::OpenOptions};
 
 #[cfg(feature = "cli")]

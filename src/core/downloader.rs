@@ -1,17 +1,27 @@
-use crate::core::types::{AlbumFile, DownloadResponse, FailedOperationInfo};
+use crate::core::types::{AlbumFile, FailedOperationInfo};
+#[cfg(feature = "download")]
+use crate::core::types::DownloadResponse;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "download")]
-use regex::Regex;
-use reqwest::{Client, header};
-use serde_json;
+use base64::{Engine as _, engine::general_purpose};
 #[cfg(feature = "download")]
 use json5;
 use std::sync::{Arc, Mutex};
-use std::sync::OnceLock;
-use base64::{Engine as _, engine::general_purpose};
+#[cfg(feature = "download")]
+use reqwest::{Client, header};
+#[cfg(feature = "download")]
+use regex::Regex;
+#[cfg(feature = "download")]
+use serde_json;
+#[cfg(feature = "download")]
 use std::path::Path;
-use tokio::io::AsyncWriteExt;
+#[cfg(feature = "download")]
+use std::sync::OnceLock;
+#[cfg(feature = "download")]
 use tokio::fs::File;
+#[cfg(feature = "download")]
+use tokio::io::AsyncWriteExt;
+#[cfg(feature = "download")]
 use tokio::task::JoinSet;
 
 #[cfg(feature = "ui")]
@@ -29,7 +39,9 @@ impl UIState {
 }
 
 pub struct BunkrDownloader {
+    #[cfg(feature = "download")]
     client: Client,
+    #[cfg(feature = "download")]
     headers: header::HeaderMap,
     #[cfg(feature = "download")]
     album_files_regex: OnceLock<Regex>,

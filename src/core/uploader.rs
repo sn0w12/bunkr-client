@@ -152,10 +152,12 @@ impl BunkrUploader {
             }]));
         }
 
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         #[cfg(feature = "ui")]
-        if let Some(ui_state) = &ui_state {
-            ui_state.lock().unwrap().add_preprocessing(path.to_string(), size);
+        {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            if let Some(ui_state) = &ui_state {
+                ui_state.lock().unwrap().add_preprocessing(path.to_string(), size);
+            }
         }
 
         let preprocess_result = crate::preprocess::preprocess::preprocess_file(path, self.max_file_size, config)?;
@@ -208,9 +210,11 @@ impl BunkrUploader {
         path: &Path,
         mime: &str,
         album_id: Option<&str>,
-        ui_state: Option<Arc<Mutex<UIState>>>,
+        _ui_state: Option<Arc<Mutex<UIState>>>,
         file_size: u64,
     ) -> Result<(Option<String>, Vec<FailedOperationInfo>)> {
+        #[cfg(feature = "ui")]
+        let ui_state = _ui_state;
         let file_name = path.file_name().unwrap().to_string_lossy().to_string();
 
         #[cfg(feature = "ui")]
@@ -320,9 +324,11 @@ impl BunkrUploader {
         path: &Path,
         mime: &str,
         album_id: Option<&str>,
-        ui_state: Option<Arc<Mutex<UIState>>>,
+        _ui_state: Option<Arc<Mutex<UIState>>>,
         file_size: u64,
     ) -> Result<(Option<String>, Vec<FailedOperationInfo>)> {
+        #[cfg(feature = "ui")]
+        let ui_state = _ui_state;
         let total_size = path.metadata()?.len();
         let total_chunks = (total_size as f64 / self.chunk_size as f64).ceil() as u64;
         let file_name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -393,9 +399,9 @@ impl BunkrUploader {
                 }]));
             }
 
+            #[cfg(feature = "ui")]
             {
                 let progress = (i + 1) as f64 / total_chunks as f64;
-                #[cfg(feature = "ui")]
                 if let Some(ui_state) = &ui_state {
                     let mut state = ui_state.lock().unwrap();
                     state.update_progress(&path.to_string_lossy(), progress);

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "cli")]
 use std::fs;
+#[cfg(feature = "cli")]
 use std::path::PathBuf;
 use anyhow::Result;
 
@@ -160,10 +162,5 @@ impl Config {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("bunkr_client.toml")
-    }
-
-    #[cfg(not(feature = "cli"))]
-    fn config_path() -> PathBuf {
-        PathBuf::from(".bunkr_client.toml")
     }
 }
