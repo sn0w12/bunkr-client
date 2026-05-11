@@ -24,6 +24,8 @@ pub struct BunkrUploader {
 }
 
 impl BunkrUploader {
+    const NODE_REFRESH_RETRIES: u32 = 1;
+
     async fn retry_with_backoff<F, Fut>(mut f: F, max_retries: u32) -> Result<reqwest::Response, anyhow::Error>
     where
         F: FnMut() -> Fut,
@@ -44,6 +46,36 @@ impl BunkrUploader {
             }
         }
         unreachable!()
+    }
+
+    async fn fetch_upload_url(
+        client: &Client,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<String> {
+        let response = Self::retry_with_backoff(|| async {
+            client
+                .get("https://dash.bunkr.cr/api/node")
+                .headers(headers.clone())
+                .send().await
+                .map_err(anyhow::Error::from)
+        }, 5).await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Node fetch failed with status {}: {}", status, text));
+        }
+        let node: NodeResponse = match serde_json::from_str(&text) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Failed to parse node response: {}", e);
+                eprintln!("Response: {}", text);
+                return Err(anyhow!("JSON parsing error: {}", e));
+            }
+        };
+        if !node.success {
+            return Err(anyhow!("Node fetch failed: server returned success=false"));
+        }
+        Ok(node.url)
     }
 
     pub async fn new(token: String) -> Result<Self> {
@@ -94,38 +126,18 @@ impl BunkrUploader {
             }
         };
 
-        let response = Self::retry_with_backoff(|| async {
-            client
-                .get("https://dash.bunkr.cr/api/node")
-                .header("token", &token)
-                .send().await
-                .map_err(anyhow::Error::from)
-        }, 5).await?;
-        let status = response.status();
-        let text = response.text().await?;
-        if !status.is_success() {
-            return Err(anyhow!("Node fetch failed with status {}: {}", status, text));
-        }
-        let node: NodeResponse = match serde_json::from_str(&text) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Failed to parse node response: {}", e);
-                eprintln!("Response: {}", text);
-                return Err(anyhow!("JSON parsing error: {}", e));
-            }
-        };
-
         // 95% of max size to account for overhead
         let max_file_size = (parse_size(&config.maxSize)? as f64 * 0.95) as u64;
         let chunk_size = parse_size(&config.chunkSize.default)?;
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("token", token.parse()?);
+        let upload_url = Self::fetch_upload_url(&client, &headers).await?;
 
         Ok(Self {
             client,
             headers,
-            upload_url: node.url,
+            upload_url,
             max_file_size,
             chunk_size,
         })
@@ -190,11 +202,41 @@ impl BunkrUploader {
             let metadata = p.metadata()?;
             let size = metadata.len();
             let mime = from_path(p).first_or_octet_stream();
-            let (url, fails) = if size <= self.chunk_size {
-                self.upload_single_file(p, mime.essence_str(), album_id, ui_state.clone(), size).await?
-            } else {
-                self.upload_chunked_file(p, mime.essence_str(), album_id, ui_state.clone(), size).await?
-            };
+            let mut upload_url = self.upload_url.clone();
+            let mut last_result = (None, Vec::new());
+
+            for attempt in 0..=Self::NODE_REFRESH_RETRIES {
+                let is_final_attempt = attempt == Self::NODE_REFRESH_RETRIES;
+                let uploader = BunkrUploader {
+                    client: self.client.clone(),
+                    headers: self.headers.clone(),
+                    upload_url: upload_url.clone(),
+                    max_file_size: self.max_file_size,
+                    chunk_size: self.chunk_size,
+                };
+
+                last_result = if size <= self.chunk_size {
+                    uploader
+                        .upload_single_file(p, mime.essence_str(), album_id, ui_state.clone(), size, is_final_attempt)
+                        .await?
+                } else {
+                    uploader
+                        .upload_chunked_file(p, mime.essence_str(), album_id, ui_state.clone(), size, is_final_attempt)
+                        .await?
+                };
+
+                if last_result.0.is_some() || last_result.1.is_empty() || is_final_attempt {
+                    break;
+                }
+
+                eprintln!(
+                    "Upload failed via node {}, fetching a fresh node URL for retry",
+                    upload_url
+                );
+                upload_url = Self::fetch_upload_url(&self.client, &self.headers).await?;
+            }
+
+            let (url, fails) = last_result;
             if let Some(u) = url {
                 urls.push(u);
             }
@@ -212,6 +254,7 @@ impl BunkrUploader {
         album_id: Option<&str>,
         _ui_state: Option<Arc<Mutex<UIState>>>,
         file_size: u64,
+        record_failure: bool,
     ) -> Result<(Option<String>, Vec<FailedOperationInfo>)> {
         #[cfg(feature = "ui")]
         let ui_state = _ui_state;
@@ -232,7 +275,7 @@ impl BunkrUploader {
             headers
         };
 
-        let response = Self::retry_with_backoff(|| async {
+        let response = match Self::retry_with_backoff(|| async {
             let file = TokioFile::open(path).await.map_err(anyhow::Error::from)?;
             let stream = ReaderStream::new(file);
             let body = Body::wrap_stream(stream);
@@ -245,18 +288,37 @@ impl BunkrUploader {
                 .multipart(form)
                 .send().await
                 .map_err(anyhow::Error::from)
-        }, 5).await?;
+        }, 5).await {
+            Ok(response) => response,
+            Err(e) => {
+                let failure = FailedOperationInfo {
+                    path: path.to_string_lossy().to_string(),
+                    error: format!("Upload request failed: {}", e),
+                    file_size,
+                    status_code: None,
+                };
+                #[cfg(feature = "ui")]
+                if record_failure {
+                    if let Some(ui_state) = &ui_state {
+                        ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), failure.clone());
+                    }
+                }
+                return Ok((None, vec![failure]));
+            }
+        };
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
             #[cfg(feature = "ui")]
-            if let Some(ui_state) = &ui_state {
-                ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
-                    path: path.to_string_lossy().to_string(),
-                    error: format!("Upload request failed with status {}: {}", status, text),
-                    file_size,
-                    status_code: Some(status.as_u16()),
-                });
+            if record_failure {
+                if let Some(ui_state) = &ui_state {
+                    ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
+                        path: path.to_string_lossy().to_string(),
+                        error: format!("Upload request failed with status {}: {}", status, text),
+                        file_size,
+                        status_code: Some(status.as_u16()),
+                    });
+                }
             }
             return Ok((None, vec![FailedOperationInfo {
                 path: path.to_string_lossy().to_string(),
@@ -269,13 +331,15 @@ impl BunkrUploader {
             Ok(r) => r,
             Err(e) => {
                 #[cfg(feature = "ui")]
-                if let Some(ui_state) = &ui_state {
-                    ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
-                        path: path.to_string_lossy().to_string(),
-                        error: format!("Failed to parse upload response: {}", e),
-                        file_size,
-                        status_code: None,
-                    });
+                if record_failure {
+                    if let Some(ui_state) = &ui_state {
+                        ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
+                            path: path.to_string_lossy().to_string(),
+                            error: format!("Failed to parse upload response: {}", e),
+                            file_size,
+                            status_code: None,
+                        });
+                    }
                 }
                 return Ok((None, vec![FailedOperationInfo {
                     path: path.to_string_lossy().to_string(),
@@ -288,13 +352,15 @@ impl BunkrUploader {
 
         if !res.success {
             #[cfg(feature = "ui")]
-            if let Some(ui_state) = &ui_state {
-                ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
-                    path: path.to_string_lossy().to_string(),
-                    error: format!("Upload failed: server returned success=false"),
-                    file_size,
-                    status_code: None,
-                });
+            if record_failure {
+                if let Some(ui_state) = &ui_state {
+                    ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
+                        path: path.to_string_lossy().to_string(),
+                        error: format!("Upload failed: server returned success=false"),
+                        file_size,
+                        status_code: None,
+                    });
+                }
             }
             return Ok((None, vec![FailedOperationInfo {
                 path: path.to_string_lossy().to_string(),
@@ -326,6 +392,7 @@ impl BunkrUploader {
         album_id: Option<&str>,
         _ui_state: Option<Arc<Mutex<UIState>>>,
         file_size: u64,
+        record_failure: bool,
     ) -> Result<(Option<String>, Vec<FailedOperationInfo>)> {
         #[cfg(feature = "ui")]
         let ui_state = _ui_state;
@@ -360,7 +427,7 @@ impl BunkrUploader {
             buf.truncate(bytes_read);
 
             let chunk_offset = i * self.chunk_size;
-            let response = Self::retry_with_backoff(|| async {
+            let response = match Self::retry_with_backoff(|| async {
                 let part = multipart::Part::bytes(buf.clone())
                     .file_name(file_name.clone())
                     .mime_str("application/octet-stream").unwrap();
@@ -378,18 +445,37 @@ impl BunkrUploader {
                     .multipart(form)
                     .send().await
                     .map_err(anyhow::Error::from)
-            }, 5).await?;
+            }, 5).await {
+                Ok(response) => response,
+                Err(e) => {
+                    let failure = FailedOperationInfo {
+                        path: path.to_string_lossy().to_string(),
+                        error: format!("Chunk {} upload failed: {}", i, e),
+                        file_size,
+                        status_code: None,
+                    };
+                    #[cfg(feature = "ui")]
+                    if record_failure {
+                        if let Some(ui_state) = &ui_state {
+                            ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), failure.clone());
+                        }
+                    }
+                    return Ok((None, vec![failure]));
+                }
+            };
             let status = response.status();
             if !status.is_success() {
                 let text = response.text().await?;
                 #[cfg(feature = "ui")]
-                if let Some(ui_state) = &ui_state {
-                    ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
-                        path: path.to_string_lossy().to_string(),
-                        error: format!("Chunk {} upload failed with status {}: {}", i, status, text),
-                        file_size,
-                        status_code: Some(status.as_u16()),
-                    });
+                if record_failure {
+                    if let Some(ui_state) = &ui_state {
+                        ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
+                            path: path.to_string_lossy().to_string(),
+                            error: format!("Chunk {} upload failed with status {}: {}", i, status, text),
+                            file_size,
+                            status_code: Some(status.as_u16()),
+                        });
+                    }
                 }
                 return Ok((None, vec![FailedOperationInfo {
                     path: path.to_string_lossy().to_string(),
@@ -425,25 +511,44 @@ impl BunkrUploader {
                     "age": null,
                 }]
             });
-            let response = Self::retry_with_backoff(|| async {
+            let response = match Self::retry_with_backoff(|| async {
                 self.client
                     .post(&finish_url)
                     .headers(self.headers.clone())
                     .json(&body)
                     .send().await
                     .map_err(anyhow::Error::from)
-            }, 5).await?;
+            }, 5).await {
+                Ok(response) => response,
+                Err(e) => {
+                    let failure = FailedOperationInfo {
+                        path: path.to_string_lossy().to_string(),
+                        error: format!("Finish chunks request failed: {}", e),
+                        file_size,
+                        status_code: None,
+                    };
+                    #[cfg(feature = "ui")]
+                    if record_failure {
+                        if let Some(ui_state) = &ui_state {
+                            ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), failure.clone());
+                        }
+                    }
+                    return Ok((None, vec![failure]));
+                }
+            };
             let status = response.status();
             let text = response.text().await?;
             if !status.is_success() {
                 #[cfg(feature = "ui")]
-                if let Some(ui_state) = &ui_state {
-                    ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
-                        path: path.to_string_lossy().to_string(),
-                        error: format!("Finish chunks request failed with status {}: {}", status, text),
-                        file_size,
-                        status_code: Some(status.as_u16()),
-                    });
+                if record_failure {
+                    if let Some(ui_state) = &ui_state {
+                        ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
+                            path: path.to_string_lossy().to_string(),
+                            error: format!("Finish chunks request failed with status {}: {}", status, text),
+                            file_size,
+                            status_code: Some(status.as_u16()),
+                        });
+                    }
                 }
                 return Ok((None, vec![FailedOperationInfo {
                     path: path.to_string_lossy().to_string(),
@@ -456,13 +561,15 @@ impl BunkrUploader {
                 Ok(r) => r,
                 Err(e) => {
                     #[cfg(feature = "ui")]
-                    if let Some(ui_state) = &ui_state {
-                        ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
-                            path: path.to_string_lossy().to_string(),
-                            error: format!("Failed to parse finish chunks response: {}", e),
-                            file_size,
-                            status_code: None,
-                        });
+                    if record_failure {
+                        if let Some(ui_state) = &ui_state {
+                            ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
+                                path: path.to_string_lossy().to_string(),
+                                error: format!("Failed to parse finish chunks response: {}", e),
+                                file_size,
+                                status_code: None,
+                            });
+                        }
                     }
                     return Ok((None, vec![FailedOperationInfo {
                         path: path.to_string_lossy().to_string(),
@@ -474,13 +581,15 @@ impl BunkrUploader {
             };
             if !res.success {
                 #[cfg(feature = "ui")]
-                if let Some(ui_state) = &ui_state {
-                    ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
-                        path: path.to_string_lossy().to_string(),
-                        error: format!("Finish chunks failed: server returned success=false"),
-                        file_size,
-                        status_code: None,
-                    });
+                if record_failure {
+                    if let Some(ui_state) = &ui_state {
+                        ui_state.lock().unwrap().add_failed_operation(path.to_string_lossy().to_string(), FailedOperationInfo {
+                            path: path.to_string_lossy().to_string(),
+                            error: format!("Finish chunks failed: server returned success=false"),
+                            file_size,
+                            status_code: None,
+                        });
+                    }
                 }
                 return Ok((None, vec![FailedOperationInfo {
                     path: path.to_string_lossy().to_string(),
