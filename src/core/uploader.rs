@@ -24,7 +24,7 @@ pub struct BunkrUploader {
 }
 
 impl BunkrUploader {
-    const NODE_REFRESH_RETRIES: u32 = 1;
+    const NODE_REFRESH_RETRIES: u32 = 6;
 
     async fn retry_with_backoff<F, Fut>(mut f: F, max_retries: u32) -> Result<reqwest::Response, anyhow::Error>
     where
