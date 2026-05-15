@@ -229,10 +229,6 @@ impl BunkrUploader {
                     break;
                 }
 
-                eprintln!(
-                    "Upload failed via node {}, fetching a fresh node URL for retry",
-                    upload_url
-                );
                 upload_url = Self::fetch_upload_url(&self.client, &self.headers).await?;
             }
 
