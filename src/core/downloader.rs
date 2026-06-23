@@ -1,9 +1,9 @@
+#[cfg(feature = "download")]
+use crate::TokenResponse;
 use crate::core::types::{AlbumFile, FailedOperationInfo};
 #[cfg(feature = "download")]
 use crate::core::types::DownloadResponse;
 use anyhow::{Result, anyhow};
-#[cfg(feature = "download")]
-use base64::{Engine as _, engine::general_purpose};
 #[cfg(feature = "download")]
 use json5;
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use std::path::Path;
 #[cfg(feature = "download")]
 use std::sync::OnceLock;
 #[cfg(feature = "download")]
-use tokio::fs::File;
+use std::time::Duration;
 #[cfg(feature = "download")]
 use tokio::io::AsyncWriteExt;
 #[cfg(feature = "download")]
@@ -230,6 +230,61 @@ impl BunkrDownloader {
         }
     }
 
+    async fn fetch_json<T: serde::de::DeserializeOwned>(
+        client: &Client,
+        method: reqwest::Method,
+        url: &str,
+        headers: Option<&header::HeaderMap>,
+        body: Option<serde_json::Value>,
+        label: &str,
+    ) -> Result<T> {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(500 * (1 << attempt))).await;
+            }
+            let mut builder = client.request(method.clone(), url);
+            if let Some(h) = headers {
+                builder = builder.headers(h.clone());
+            }
+            if let Some(ref b) = body {
+                builder = builder.json(b);
+            }
+            match builder.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body_text = resp.text().await?;
+                    if !status.is_success() {
+                        last_error = Some(anyhow!(
+                            "{} API returned status {}: {}",
+                            label, status, &body_text[..body_text.len().min(200)]
+                        ));
+                        continue;
+                    }
+                    match serde_json::from_str::<T>(&body_text) {
+                        Ok(val) => return Ok(val),
+                        Err(e) => {
+                            last_error = Some(anyhow!(
+                                "Failed to parse {} response (status {}): {} - body: {}",
+                                label, status, e, &body_text[..body_text.len().min(200)]
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(anyhow!("{} request failed: {}", label, e));
+                    continue;
+                }
+            }
+        }
+        Err(anyhow!(
+            "{} failed after 3 retries: {}",
+            label,
+            last_error.unwrap()
+        ))
+    }
+
     async fn download_file_owned(
         client: Client,
         headers: header::HeaderMap,
@@ -237,62 +292,106 @@ impl BunkrDownloader {
         output_dir: String,
         ui_state: Option<Arc<Mutex<UIState>>>,
     ) -> Result<()> {
-        // Post to the API to get the download URL
-        let api_url = "https://apidl.bunkr.ru/api/_001_v2";
-        let body = serde_json::json!({ "id": file.id.to_string() });
-
-        let response = client.post(api_url).headers(headers).json(&body).send().await?;
-        let response_text = response.text().await?;
-
-        if !response_text.trim().starts_with('{') {
-            return Err(anyhow!("API returned non-JSON response: {}", response_text));
-        }
-
-        let download_resp: DownloadResponse = serde_json::from_str(&response_text)?;
-
-        if !download_resp.encrypted {
-            return Err(anyhow!("Download URL is not encrypted"));
-        }
-
-        // Decode the URL
-        let decoded_url = BunkrDownloader::decrypt_url(&download_resp.url, download_resp.timestamp)?;
-
-        // Append the name parameter as per JS
-        let separator = if decoded_url.contains('?') { '&' } else { '?' };
-        let encoded_name = urlencoding::encode(&file.original);
-        let full_url = format!("{}{}n={}", decoded_url, separator, encoded_name);
-
-        // Download the file
-        let mut download_headers = header::HeaderMap::new();
-        download_headers.insert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0".parse()?);
-        download_headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".parse()?);
-        download_headers.insert("Accept-Language", "en-US,en;q=0.5".parse()?);
-        download_headers.insert("Referer", "https://get.bunkrr.su/".parse()?);
-
-        let response = client.get(&full_url).headers(download_headers).send().await?;
-        if !response.status().is_success() {
-            return Err(anyhow!("Failed to download file: {}", response.status()));
-        }
-
-        let total_size = response.content_length().unwrap_or(file.size as u64);
-        let mut downloaded = 0u64;
         let file_path = Path::new(&output_dir).join(&file.original);
-        let mut file_handle = File::create(&file_path).await?;
+        if file_path.exists() {
+            return Ok(());
+        }
 
-        let mut response = response;
-        while let Some(chunk) = response.chunk().await? {
-            file_handle.write_all(&chunk).await?;
-            downloaded += chunk.len() as u64;
+        let api_url = "https://dl.bunkr.cr/api/_001_v2";
 
-            if let Some(ref state) = ui_state {
-                let mut state = state.lock().unwrap();
-                let progress = if total_size > 0 { (downloaded as f64 / total_size as f64).min(1.0) } else { 0.0 };
-                state.update_progress(&file.original, progress);
-                state.add_processed_bytes(chunk.len() as u64);
+        let mut last_error = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(1000 * (1 << attempt))).await;
+            }
+
+            let body = serde_json::json!({ "id": file.id.to_string() });
+
+            let download_resp = match Self::fetch_json::<DownloadResponse>(
+                &client,
+                reqwest::Method::POST,
+                api_url,
+                Some(&headers),
+                Some(body),
+                "download_url",
+            ).await {
+                Ok(r) => r,
+                Err(e) => { last_error = Some(e); continue; }
+            };
+
+            let token_url = format!("https://glb-apisign.cdn.cr/sign?path={}", download_resp.path);
+
+            let token_resp = match Self::fetch_json::<TokenResponse>(
+                &client,
+                reqwest::Method::GET,
+                &token_url,
+                None,
+                None,
+                "token",
+            ).await {
+                Ok(r) => r,
+                Err(e) => { last_error = Some(e); continue; }
+            };
+
+            let full_url = format!("{}{}?n={}&token={}&ex={}", download_resp.mediafiles, download_resp.path, download_resp.original, token_resp.token, token_resp.ex);
+
+            let mut download_headers = header::HeaderMap::new();
+            download_headers.insert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0".parse()?);
+            download_headers.insert("Accept", "*/*".parse()?);
+            download_headers.insert("Accept-Language", "en-US,en;q=0.5".parse()?);
+            download_headers.insert("Referer", "https://dl.bunkrr.cr/".parse()?);
+
+            let response = match client.get(&full_url).headers(download_headers).send().await {
+                Ok(r) => r,
+                Err(e) => { last_error = Some(anyhow!("{}", e)); continue; }
+            };
+
+            if !response.status().is_success() {
+                last_error = Some(anyhow!("Failed to download file: {}", response.status()));
+                continue;
+            }
+
+            let total_size = response.content_length().unwrap_or(file.size as u64);
+            let mut downloaded = 0u64;
+
+            match tokio::fs::File::create(&file_path).await {
+                Ok(mut file_handle) => {
+                    let result: Result<()> = async {
+                        let mut stream = response;
+                        while let Some(chunk) = stream.chunk().await.map_err(|e| anyhow!("{}", e))? {
+                            file_handle.write_all(&chunk).await?;
+                            downloaded += chunk.len() as u64;
+
+                            if let Some(ref state) = ui_state {
+                                let mut state = state.lock().unwrap();
+                                let progress = if total_size > 0 { (downloaded as f64 / total_size as f64).min(1.0) } else { 0.0 };
+                                state.update_progress(&file.original, progress);
+                                state.add_processed_bytes(chunk.len() as u64);
+                            }
+                        }
+                        Ok(())
+                    }.await;
+
+                    match result {
+                        Ok(()) => return Ok(()),
+                        Err(e) => {
+                            let _ = tokio::fs::remove_file(&file_path).await;
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(anyhow!("Failed to create file: {}", e));
+                    continue;
+                }
             }
         }
 
-        Ok(())
+        Err(anyhow!(
+            "Download failed after 3 retries: {}",
+            last_error.unwrap()
+        ))
     }
 
     pub async fn download_files(&self, files: Vec<AlbumFile>, output_dir: &str, batch_size: usize, ui_state: Option<Arc<Mutex<UIState>>>) -> Result<()> {
@@ -358,26 +457,5 @@ impl BunkrDownloader {
         }
 
         Ok(())
-    }
-
-    fn decrypt_url(encrypted_base64: &str, timestamp: i64) -> Result<String> {
-        // Calculate the key as per the JavaScript
-        let divisor = 3600.0;
-        let suffix = ((timestamp as f64) / divisor).floor() as i64;
-        let key = format!("SECRET_KEY_{}", suffix);
-
-        // Base64 decode
-        let bytes = general_purpose::STANDARD.decode(encrypted_base64)?;
-
-        // XOR decrypt with key
-        let key_bytes = key.as_bytes();
-        let mut output = Vec::with_capacity(bytes.len());
-        for (i, &b) in bytes.iter().enumerate() {
-            output.push(b ^ key_bytes[i % key_bytes.len()]);
-        }
-
-        // Decode as UTF-8
-        let decoded = String::from_utf8(output)?;
-        Ok(decoded)
     }
 }

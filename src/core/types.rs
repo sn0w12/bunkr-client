@@ -78,7 +78,13 @@ pub struct AlbumFile {
 
 #[derive(Debug, Deserialize)]
 pub struct DownloadResponse {
-    pub encrypted: bool,
-    pub timestamp: i64,
-    pub url: String,
+    pub mediafiles: String,
+    pub original: String,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TokenResponse {
+    pub ex: i64,
+    pub token: String,
 }
